@@ -32,35 +32,55 @@
 
           <!-- Receipts in group -->
           <div class="space-y-2">
-            <NuxtLink
+            <div
               v-for="receipt in group.receipts"
               :key="receipt.id"
-              :to="`/receipt/${receipt.id}`"
-              class="flex items-center gap-3 bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm active:scale-[0.98] transition-transform"
+              class="relative overflow-hidden rounded-xl"
             >
-              <!-- Store icon placeholder -->
-              <div class="w-10 h-10 rounded-xl bg-gray-100 dark:bg-gray-700 flex items-center justify-center flex-shrink-0">
-                <UIcon name="i-heroicons-receipt-percent" class="w-5 h-5 text-gray-400" />
+              <!-- Delete action (revealed on swipe) -->
+              <div class="absolute inset-y-0 right-0 flex items-center justify-end bg-red-500 rounded-xl px-5">
+                <button class="text-white flex flex-col items-center gap-1 text-xs" @click="swipeDelete(receipt.id)">
+                  <UIcon name="i-heroicons-trash" class="w-5 h-5" />
+                  Delete
+                </button>
               </div>
-              <div class="flex-1 min-w-0">
-                <p class="font-medium text-gray-900 dark:text-white text-sm truncate">{{ receipt.storeName }}</p>
-                <p class="text-xs text-gray-400 mt-0.5">{{ formatTime(receipt.receiptDatetime) }}</p>
-              </div>
-              <div class="text-right flex-shrink-0">
-                <p class="font-semibold text-gray-900 dark:text-white text-sm">
-                  {{ formatCurrency(receipt.total) }}
-                </p>
-                <UBadge
-                  v-if="receipt.processingStatus !== 'done'"
-                  :color="receipt.processingStatus === 'error' ? 'error' : 'warning'"
-                  variant="subtle"
-                  size="xs"
-                  class="mt-1"
-                >
-                  {{ receipt.processingStatus }}
-                </UBadge>
-              </div>
-            </NuxtLink>
+              <!-- Receipt row (slides left on swipe) -->
+              <NuxtLink
+                :to="`/receipt/${receipt.id}`"
+                class="flex items-center gap-3 bg-white dark:bg-gray-800 p-4 shadow-sm active:opacity-70 relative z-10"
+                :style="{
+                  transform: swipedId === receipt.id ? `translateX(${swipeX}px)` : 'translateX(0)',
+                  transition: swipedId === receipt.id ? 'none' : 'transform 0.2s ease',
+                }"
+                @touchstart="onSwipeStart"
+                @touchmove="(e) => onSwipeMove(e, receipt.id)"
+                @touchend="onSwipeEnd"
+                @click.prevent="swipedId === receipt.id ? (swipedId = null) : navigateTo(`/receipt/${receipt.id}`)"
+              >
+                <!-- Store icon placeholder -->
+                <div class="w-10 h-10 rounded-xl bg-gray-100 dark:bg-gray-700 flex items-center justify-center flex-shrink-0">
+                  <UIcon name="i-heroicons-receipt-percent" class="w-5 h-5 text-gray-400" />
+                </div>
+                <div class="flex-1 min-w-0">
+                  <p class="font-medium text-gray-900 dark:text-white text-sm truncate">{{ receipt.storeName }}</p>
+                  <p class="text-xs text-gray-400 mt-0.5">{{ formatTime(receipt.receiptDatetime) }}</p>
+                </div>
+                <div class="text-right flex-shrink-0">
+                  <p class="font-semibold text-gray-900 dark:text-white text-sm">
+                    {{ formatCurrency(receipt.total) }}
+                  </p>
+                  <UBadge
+                    v-if="receipt.processingStatus !== 'done'"
+                    :color="receipt.processingStatus === 'error' ? 'error' : 'warning'"
+                    variant="subtle"
+                    size="xs"
+                    class="mt-1"
+                  >
+                    {{ receipt.processingStatus }}
+                  </UBadge>
+                </div>
+              </NuxtLink>
+            </div>
           </div>
         </div>
 
@@ -184,6 +204,52 @@ function formatCurrency(amount: number): string {
 
 function formatTime(iso: string): string {
   return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(iso))
+}
+
+// Swipe-to-delete state
+const swipedId = ref<string | null>(null)
+const swipeX = ref(0)
+let swipeStartX = 0
+let swipeStartY = 0
+
+function onSwipeStart(e: TouchEvent) {
+  if (!e.touches[0]) return
+  swipeStartX = e.touches[0].clientX
+  swipeStartY = e.touches[0].clientY
+}
+
+function onSwipeMove(e: TouchEvent, id: string) {
+  if (!e.touches[0]) return
+  const dx = e.touches[0].clientX - swipeStartX
+  const dy = Math.abs(e.touches[0].clientY - swipeStartY)
+  if (dy > 20) return // scrolling vertically, not swiping
+  if (dx < -10) {
+    swipedId.value = id
+    swipeX.value = Math.max(dx, -80)
+  } else if (dx > 0 && swipedId.value === id) {
+    swipedId.value = null
+    swipeX.value = 0
+  }
+}
+
+function onSwipeEnd() {
+  if (swipeX.value < -60) {
+    // Swiped far enough — keep revealed
+  } else {
+    swipedId.value = null
+    swipeX.value = 0
+  }
+}
+
+async function swipeDelete(id: string) {
+  try {
+    await $fetch(`/api/receipts/${id}`, { method: 'DELETE' })
+    allReceipts.value = allReceipts.value.filter(r => r.id !== id)
+    total.value--
+    swipedId.value = null
+  } catch {
+    swipedId.value = null
+  }
 }
 
 // Initial load
