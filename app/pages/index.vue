@@ -1,6 +1,40 @@
 <template>
   <NuxtLayout>
     <div class="max-w-lg mx-auto pb-20">
+      <!-- Pull to refresh indicator -->
+      <div
+        class="flex justify-center transition-all duration-200 overflow-hidden"
+        :style="{ height: pulling ? `${Math.min(pullDistance, 60)}px` : '0px' }"
+      >
+        <div class="flex items-center gap-2 text-emerald-500 text-sm">
+          <div
+            class="w-5 h-5 border-2 border-emerald-500 border-t-transparent rounded-full"
+            :class="{ 'animate-spin': refreshing }"
+          />
+          <span v-if="refreshing">Refreshing...</span>
+          <span v-else-if="pullDistance >= 60">Release to refresh</span>
+          <span v-else>Pull to refresh</span>
+        </div>
+      </div>
+
+      <!-- PWA Install Banner -->
+      <div
+        v-if="canInstall && !installed"
+        class="mx-4 mb-3 bg-emerald-50 dark:bg-emerald-950 border border-emerald-200 dark:border-emerald-800 rounded-2xl p-4 flex items-center gap-3"
+      >
+        <div class="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center flex-shrink-0">
+          <span class="text-white text-lg">💰</span>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="font-medium text-emerald-900 dark:text-emerald-100 text-sm">Add to Home Screen</p>
+          <p class="text-xs text-emerald-600 dark:text-emerald-400">Access Track Cashflow from your phone</p>
+        </div>
+        <div class="flex gap-2 flex-shrink-0">
+          <button class="text-xs text-emerald-500 px-2 py-1" @click="dismiss">Later</button>
+          <UButton size="xs" color="primary" @click="install">Install</UButton>
+        </div>
+      </div>
+
       <!-- Header -->
       <div class="px-4 pt-6 pb-4 flex items-center justify-between">
         <div>
@@ -88,12 +122,12 @@ import type { ReceiptListResponse, CashflowResponse, CategoryBreakdownResponse }
 
 definePageMeta({ middleware: 'auth' })
 
-const { data: receipts, pending: receiptsPending } = await useFetch<ReceiptListResponse>('/api/receipts', {
+const { data: receipts, pending: receiptsPending, refresh: refreshReceipts } = await useFetch<ReceiptListResponse>('/api/receipts', {
   query: { pageSize: 10 },
 })
 
-const { data: cashflowData, pending: cashflowPending } = await useFetch<CashflowResponse>('/api/analytics/cashflow')
-const { data: categoryData } = await useFetch<CategoryBreakdownResponse>('/api/analytics/categories')
+const { data: cashflowData, pending: cashflowPending, refresh: refreshCashflow } = await useFetch<CashflowResponse>('/api/analytics/cashflow')
+const { data: categoryData, refresh: refreshCategories } = await useFetch<CategoryBreakdownResponse>('/api/analytics/categories')
 
 const now = new Date()
 const currentMonthLabel = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
@@ -124,4 +158,16 @@ function formatCurrency(amount: number | null): string {
 function formatDate(iso: string): string {
   return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso))
 }
+
+// Pull to refresh
+const { refreshing, pulling, pullDistance } = usePullToRefresh(async () => {
+  await Promise.all([
+    refreshReceipts(),
+    refreshCashflow(),
+    refreshCategories(),
+  ])
+})
+
+// PWA install banner
+const { canInstall, installed, install, dismiss } = usePwaInstall()
 </script>
