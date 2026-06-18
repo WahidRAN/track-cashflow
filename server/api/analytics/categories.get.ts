@@ -33,10 +33,11 @@ export default defineEventHandler(async (event): Promise<CategoryBreakdownRespon
     ORDER BY total DESC
   `)
 
-  const totalSpend = rows.rows.reduce((s: number, r: any) => s + ((r.total as number) || 0), 0)
+  const rowsArray = Array.from(rows)
+  const totalSpend = rowsArray.reduce((s: number, r: any) => s + ((r.total as number) || 0), 0)
 
   return {
-    categories: rows.rows.map((r: any) => ({
+    categories: rowsArray.map((r: any) => ({
       categoryId: r.category_id as string,
       categoryName: (r.category_name as string) || 'Uncategorized',
       categoryIcon: (r.category_icon as string | null) ?? null,

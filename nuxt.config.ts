@@ -66,9 +66,7 @@ export default defineNuxtConfig({
 
   typescript: {
     tsConfig: {
-      compilerOptions: {
-        types: ['node'],
-      },
+      compilerOptions: {},
     },
   },
 

@@ -25,7 +25,7 @@ export default defineEventHandler(async (event): Promise<CashflowResponse> => {
   `)
 
   return {
-    months: rows.rows.map((r: any) => ({
+    months: Array.from(rows).map((r: any) => ({
       year: r.year as number,
       month: r.month as number,
       total: r.total as number,

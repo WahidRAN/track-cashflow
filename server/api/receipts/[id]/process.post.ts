@@ -1,5 +1,4 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { Buffer } from 'node:buffer'
 import { serverSupabaseUser } from '#supabase/server'
 import { useAnthropicClient } from '~/server/utils/claude'
 import { useVoyageClient } from '~/server/utils/voyage'
@@ -75,7 +74,7 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
     if (receipt.imageUrl) {
       // Fetch image from Supabase Storage as base64
       const urlParts = receipt.imageUrl.split('/storage/v1/object/public/receipts/')
-      const storagePath = urlParts[1]
+      const storagePath = urlParts[1] ?? ''
 
       const { data: imageData, error } = await supabaseAdmin.storage
         .from('receipts')

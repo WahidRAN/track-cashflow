@@ -34,5 +34,5 @@ export async function findSimilarItems(
       LIMIT ${limit}
     `,
   )
-  return result as unknown as Array<{ unit_price: string; similarity: number }>
+  return Array.from(result) as Array<{ unit_price: string; similarity: number }>
 }
