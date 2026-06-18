@@ -62,6 +62,23 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
 
   if (!receipt) throw createError({ statusCode: 404, message: 'Receipt not found' })
 
+  // Rate limit: 50 AI processing calls per 24 hours
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
+  const countResult = await db.execute(sql`
+    SELECT COUNT(*)::int AS count
+    FROM receipts
+    WHERE user_id = ${user.id}::uuid
+      AND processing_status = 'done'
+      AND updated_at > ${oneDayAgo}
+  `)
+  const processedToday = Number((countResult as any)[0]?.count ?? 0)
+  if (processedToday >= 50) {
+    throw createError({
+      statusCode: 429,
+      message: 'Daily limit reached (50 receipts/day). Try again tomorrow.',
+    })
+  }
+
   // Mark as processing
   await db.update(receipts).set({ processingStatus: 'processing' }).where(eq(receipts.id, receiptId))
 
