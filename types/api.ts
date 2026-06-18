@@ -81,3 +81,22 @@ export interface CategoryBreakdownResponse {
   dateFrom: string
   dateTo: string
 }
+
+export interface UpdateReceiptBody {
+  storeName?: string
+  storeAddress?: string | null
+  receiptDatetime?: string
+  subtotal?: number | null
+  taxTotal?: number | null
+  total?: number
+}
+
+export interface UpdateItemBody {
+  generalizedName?: string
+  brandName?: string | null
+  quantity?: number
+  unitPrice?: number
+  lineTotal?: number
+  taxAmount?: number
+  categoryName?: string
+}
