@@ -1,4 +1,6 @@
 // nuxt.config.ts
+import { fileURLToPath } from 'node:url'
+
 export default defineNuxtConfig({
   compatibilityDate: '2024-11-01',
   devtools: { enabled: true },
@@ -61,4 +63,18 @@ export default defineNuxtConfig({
   },
 
   css: ['~/assets/css/main.css'],
+
+  typescript: {
+    tsConfig: {
+      compilerOptions: {
+        types: ['node'],
+      },
+    },
+  },
+
+  alias: {
+    '~/db': fileURLToPath(new URL('./db', import.meta.url)),
+    '~/types': fileURLToPath(new URL('./types', import.meta.url)),
+    '~/server': fileURLToPath(new URL('./server', import.meta.url)),
+  },
 })
