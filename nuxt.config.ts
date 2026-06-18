@@ -5,6 +5,21 @@ export default defineNuxtConfig({
   compatibilityDate: '2024-11-01',
   devtools: { enabled: true },
 
+  app: {
+    head: {
+      meta: [
+        { name: 'viewport', content: 'width=device-width, initial-scale=1, viewport-fit=cover' },
+        { name: 'mobile-web-app-capable', content: 'yes' },
+        { name: 'apple-mobile-web-app-capable', content: 'yes' },
+        { name: 'apple-mobile-web-app-status-bar-style', content: 'default' },
+        { name: 'theme-color', content: '#10b981' },
+      ],
+      link: [
+        { rel: 'apple-touch-icon', href: '/icons/pwa-192.png' },
+      ],
+    },
+  },
+
   modules: [
     '@nuxt/ui',
     '@nuxtjs/supabase',

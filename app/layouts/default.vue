@@ -2,7 +2,8 @@
   <div class="min-h-screen bg-gray-50 dark:bg-gray-900">
     <slot />
     <!-- Bottom navigation for mobile -->
-    <nav class="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 safe-bottom">
+    <nav class="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700"
+         style="padding-bottom: env(safe-area-inset-bottom, 0px)">
       <div class="flex justify-around items-center h-16 max-w-lg mx-auto px-4">
         <NuxtLink to="/" class="flex flex-col items-center gap-1 text-xs py-2 px-3" active-class="text-emerald-600">
           <UIcon name="i-heroicons-home" class="w-6 h-6" />
@@ -20,7 +21,7 @@
         </NuxtLink>
       </div>
     </nav>
-    <!-- Spacer for bottom nav -->
-    <div class="h-16" />
+    <!-- Spacer for bottom nav (nav height + safe area) -->
+    <div style="height: calc(4rem + env(safe-area-inset-bottom, 0px))" />
   </div>
 </template>
