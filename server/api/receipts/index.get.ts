@@ -1,7 +1,7 @@
 import { serverSupabaseUser } from '#supabase/server'
 import { useDb } from '~/server/utils/db'
 import { receipts } from '~/db/schema'
-import { eq, desc, and, gte, lte, count } from 'drizzle-orm'
+import { eq, desc, and, gte, lte, count, sql } from 'drizzle-orm'
 
 export default defineEventHandler(async (event) => {
   const user = await serverSupabaseUser(event)
@@ -17,6 +17,12 @@ export default defineEventHandler(async (event) => {
   const conditions = [eq(receipts.userId, user.id)]
   if (query.from) conditions.push(gte(receipts.receiptDatetime, new Date(query.from as string)))
   if (query.to) conditions.push(lte(receipts.receiptDatetime, new Date(query.to as string)))
+  if (query.search) conditions.push(sql`store_search_vector @@ plainto_tsquery('english', ${query.search as string})`)
+  if (query.category) conditions.push(sql`EXISTS (
+    SELECT 1 FROM receipt_items ri
+    WHERE ri.receipt_id = ${receipts.id}
+      AND ri.category_name = ${query.category as string}
+  )`)
 
   const [data, totalResult] = await Promise.all([
     db.select().from(receipts)
