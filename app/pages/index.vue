@@ -26,31 +26,11 @@
       </div>
 
       <!-- Category breakdown -->
-      <div v-if="categories?.length" class="mx-4 mb-4 bg-white dark:bg-gray-800 rounded-2xl p-4 shadow-sm">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">By Category</h2>
-        <div class="space-y-2">
-          <div
-            v-for="cat in topCategories"
-            :key="cat.categoryId"
-            class="flex items-center gap-3"
-          >
-            <span class="text-xl w-7 text-center flex-shrink-0">{{ cat.categoryIcon || '📦' }}</span>
-            <div class="flex-1 min-w-0">
-              <div class="flex justify-between text-sm mb-1">
-                <span class="text-gray-700 dark:text-gray-300 truncate">{{ cat.categoryName }}</span>
-                <span class="font-medium text-gray-900 dark:text-white ml-2 flex-shrink-0">
-                  {{ formatCurrency(cat.total) }}
-                </span>
-              </div>
-              <div class="h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
-                <div
-                  class="h-full bg-emerald-400 rounded-full transition-all"
-                  :style="{ width: `${(cat.total / (categoryData?.total || 1)) * 100}%` }"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
+      <div v-if="categories?.length" class="mx-4 mb-4">
+        <DashboardCategoryBreakdown
+          :categories="categories"
+          :total="categoryData?.total || 0"
+        />
       </div>
 
       <!-- Recent receipts -->
@@ -135,7 +115,6 @@ const monthDelta = computed(() => {
 })
 
 const categories = computed(() => categoryData.value?.categories || [])
-const topCategories = computed(() => categories.value.slice(0, 5))
 
 function formatCurrency(amount: number | null): string {
   if (amount === null) return '-'
