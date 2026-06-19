@@ -30,7 +30,6 @@
   "devDependencies": {
     "@types/node": "^25.9.3",
     "drizzle-kit": "^0.31.10",
-    "supabase": "^2.107.0",
     "typescript": "^6.0.3"
   }
 }
