@@ -1,0 +1,10 @@
+{
+  "buildCommand": "npx nuxi build",
+  "outputDirectory": ".output/public",
+  "framework": "nuxtjs",
+  "functions": {
+    "server/api/**/*.ts": {
+      "maxDuration": 60
+    }
+  }
+}
