@@ -7,8 +7,8 @@ Mobile-first PWA for tracking household spending via receipt capture. Built with
 - **Frontend**: Nuxt 4 (srcDir: `app/`), Vue 3, Tailwind CSS v4, Nuxt UI v4
 - **Backend**: Nuxt server routes (Nitro), all in `server/api/`
 - **Database**: Supabase (PostgreSQL + pgvector), Drizzle ORM
-- **AI**: Anthropic Claude `claude-opus-4-5` for receipt OCR/extraction via tool_choice
-- **Embeddings**: Voyage AI `voyage-3-lite` (1024-dim) for item price comparison RAG
+- **AI**: Pluggable receipt extraction via `AI_PROVIDER` — Anthropic Claude (`claude-opus-4-5` default, via tool_choice) or local Ollama (`qwen2.5vl:7b` default). See `docs/local-ai-setup.md`
+- **Embeddings**: Voyage AI `voyage-3-lite` (1024-dim) for item price comparison RAG — optional; skipped if `VOYAGE_API_KEY` is empty
 - **Auth**: Supabase magic link (`@nuxtjs/supabase`)
 
 ## Key Nuxt 4 Quirk
@@ -59,6 +59,7 @@ server/
       categories.get.ts # Category breakdown for date range
   utils/
     claude.ts           # useAnthropicClient()
+    receiptExtractor.ts # extractReceipt() — dispatches to Claude or Ollama per AI_PROVIDER
     voyage.ts           # useVoyageClient()
     supabase.ts         # useSupabaseAdmin()
     db.ts               # useDb() + findSimilarItems() pgvector helper
@@ -75,10 +76,12 @@ types/
 ## AI Pipeline (`process.post.ts`)
 
 1. Rate limit check (50/day per user)
-2. Fetch receipt image from Supabase Storage as base64
-3. Call `claude-opus-4-5` with `tool_choice: { type: 'any' }` and receipt schema as a tool → guaranteed structured JSON
+2. Fetch receipt image from Supabase Storage as base64 (client already resized it to max 1600px JPEG)
+3. `extractReceipt()` in `server/utils/receiptExtractor.ts` picks the provider from `AI_PROVIDER`:
+   - `claude` (default): `CLAUDE_MODEL` with `tool_choice: { type: 'any' }` and receipt schema as a tool → guaranteed structured JSON
+   - `ollama`: `OLLAMA_MODEL` at `OLLAMA_BASE_URL` (local only — unreachable from Vercel; setup in `docs/local-ai-setup.md`)
 4. Update receipt metadata (storeName, datetime, totals)
-5. Batch embed all item `generalizedName` values via `voyage-3-lite`
+5. If `VOYAGE_API_KEY` is set: batch embed all item `generalizedName` values via `voyage-3-lite` (otherwise steps 5–6 are skipped and no price indicator is computed)
 6. For each item: pgvector HNSW cosine similarity search (threshold 0.82) → compute price indicator
 7. Insert items with raw SQL (vector column needs `::vector` cast)
 8. Set `processingStatus: 'done'`
@@ -98,6 +101,16 @@ All secrets are confirmed server-only. In `nuxt.config.ts`, `anthropicApiKey`, `
 ## Environment Variables
 
 See `.env.example`. All secrets are `runtimeConfig` server-only keys (not `public`). The client only receives `NUXT_PUBLIC_SUPABASE_URL` and `NUXT_PUBLIC_SUPABASE_ANON_KEY`.
+
+AI provider vars (server-only):
+- `AI_PROVIDER` — `claude` (default) | `ollama`
+- `CLAUDE_MODEL` — default `claude-opus-4-5`
+- `OLLAMA_BASE_URL` — default `http://localhost:11434`
+- `OLLAMA_MODEL` — default `qwen2.5vl:7b`
+- `ANTHROPIC_API_KEY` — required only when `AI_PROVIDER=claude`
+- `VOYAGE_API_KEY` — optional; empty disables embeddings/price comparison
+
+Local Ollama setup (Windows + WSL2 networking, RTX 2060 expectations, quality comparison): `docs/local-ai-setup.md`.
 
 ## Development
 

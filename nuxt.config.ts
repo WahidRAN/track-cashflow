@@ -71,6 +71,11 @@ export default defineNuxtConfig({
     voyageApiKey: process.env.VOYAGE_API_KEY || '',
     supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
     databaseUrl: process.env.DATABASE_URL || '',
+    // Receipt extraction provider: 'claude' (default) or 'ollama' (local)
+    aiProvider: process.env.AI_PROVIDER || 'claude',
+    claudeModel: process.env.CLAUDE_MODEL || 'claude-opus-4-5',
+    ollamaBaseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+    ollamaModel: process.env.OLLAMA_MODEL || 'qwen2.5vl:7b',
     public: {
       supabaseUrl: process.env.NUXT_PUBLIC_SUPABASE_URL || '',
       supabaseKey: process.env.NUXT_PUBLIC_SUPABASE_ANON_KEY || '',

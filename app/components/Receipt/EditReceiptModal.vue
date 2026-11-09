@@ -36,7 +36,7 @@
 
     <template #footer>
       <div class="flex gap-3 w-full">
-        <UButton variant="ghost" color="neutral" class="flex-1" @click="open = false">
+        <UButton variant="ghost" color="neutral" class="flex-1" @click="() => { open = false }">
           Cancel
         </UButton>
         <UButton color="primary" class="flex-1" :loading="saving" @click="save">

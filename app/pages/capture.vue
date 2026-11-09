@@ -75,9 +75,14 @@
 
       <!-- Processing state -->
       <div v-if="processing" class="px-4 mt-6 space-y-4">
-        <div class="flex items-center gap-3 text-gray-500">
-          <div class="w-5 h-5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
-          <span class="text-sm">{{ processingMessage }}</span>
+        <div>
+          <div class="flex items-center gap-3 text-gray-500">
+            <div class="w-5 h-5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+            <span class="text-sm">{{ processingMessage }}</span>
+          </div>
+          <p class="mt-1 pl-8 text-xs text-gray-400 dark:text-gray-500">
+            This can take up to a minute
+          </p>
         </div>
         <div class="space-y-3">
           <USkeleton class="h-5 w-3/4 rounded-lg" />
@@ -158,8 +163,10 @@ async function processUpload(file: File | Blob) {
   uploading.value = true
   error.value = null
   try {
+    // Downscale big phone photos (local vision models + Claude's ~5MB limit)
+    const resized = await resizeImage(file)
     const formData = new FormData()
-    formData.append('image', file, 'receipt.jpg')
+    formData.append('image', resized, 'receipt.jpg')
     const res = await $fetch('/api/receipts', {
       method: 'POST',
       body: formData,
@@ -176,11 +183,18 @@ async function runProcessing(receiptId: string) {
   uploading.value = false
   processing.value = true
 
-  // Cycle through processing messages
+  // Step through processing messages, then hold on the last one
+  // (local inference can take 30–90s, so don't loop back to the start)
   let msgIndex = 0
+  processingMessage.value = processingMessages[0]
+  if (messageInterval) clearInterval(messageInterval)
   messageInterval = setInterval(() => {
-    msgIndex = (msgIndex + 1) % processingMessages.length
+    msgIndex = Math.min(msgIndex + 1, processingMessages.length - 1)
     processingMessage.value = processingMessages[msgIndex]
+    if (msgIndex === processingMessages.length - 1 && messageInterval) {
+      clearInterval(messageInterval)
+      messageInterval = null
+    }
   }, 2000)
 
   try {
@@ -191,6 +205,11 @@ async function runProcessing(receiptId: string) {
   } finally {
     processing.value = false
     if (messageInterval) clearInterval(messageInterval)
+    messageInterval = null
   }
 }
+
+onBeforeUnmount(() => {
+  if (messageInterval) clearInterval(messageInterval)
+})
 </script>

@@ -1,49 +1,13 @@
-import Anthropic from '@anthropic-ai/sdk'
 import { serverSupabaseUser } from '#supabase/server'
-import { useAnthropicClient } from '~/server/utils/claude'
+import { extractReceipt } from '~/server/utils/receiptExtractor'
+import type { ExtractReceiptInput } from '~/server/utils/receiptExtractor'
 import { useVoyageClient } from '~/server/utils/voyage'
 import { useDb, findSimilarItems } from '~/server/utils/db'
 import { useSupabaseAdmin } from '~/server/utils/supabase'
-import { receipts, receiptItems, categories } from '~/db/schema'
+import { receipts, categories } from '~/db/schema'
 import { eq, and } from 'drizzle-orm'
 import { sql } from 'drizzle-orm'
 import type { ProcessReceiptResponse } from '~/types/api'
-
-// JSON schema for Claude structured output
-const RECEIPT_SCHEMA = {
-  type: 'object',
-  properties: {
-    store_name: { type: 'string' },
-    store_address: { type: 'string' },
-    receipt_datetime: { type: 'string', description: 'ISO 8601 datetime, best guess if not shown' },
-    subtotal: { type: 'number' },
-    tax_total: { type: 'number' },
-    total: { type: 'number' },
-    items: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          raw_name: { type: 'string', description: 'Exact text from receipt' },
-          generalized_name: { type: 'string', description: 'Human-readable product name, normalized' },
-          brand_name: { type: 'string' },
-          quantity: { type: 'number' },
-          unit_price: { type: 'number' },
-          line_total: { type: 'number' },
-          tax_amount: { type: 'number' },
-          category: {
-            type: 'string',
-            enum: ['Groceries', 'Personal Care', 'Household', 'Pharmacy', 'Restaurant', 'Coffee', 'Clothing', 'Electronics', 'Transportation', 'Entertainment', 'Other'],
-          },
-        },
-        required: ['raw_name', 'generalized_name', 'unit_price', 'line_total', 'category'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['store_name', 'receipt_datetime', 'total', 'items'],
-  additionalProperties: false,
-}
 
 export default defineEventHandler(async (event): Promise<ProcessReceiptResponse> => {
   const user = await serverSupabaseUser(event)
@@ -52,8 +16,7 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
   const receiptId = getRouterParam(event, 'id')!
   const db = useDb()
   const supabaseAdmin = useSupabaseAdmin()
-  const claude = useAnthropicClient()
-  const voyage = useVoyageClient()
+  const config = useRuntimeConfig()
 
   // Load receipt
   const receiptRows = await db.select().from(receipts)
@@ -83,10 +46,8 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
   await db.update(receipts).set({ processingStatus: 'processing' }).where(eq(receipts.id, receiptId))
 
   try {
-    // --- Step 1: Claude extraction ---
-    let extractedData: any
-
-    const messages: Anthropic.MessageParam[] = []
+    // --- Step 1: AI extraction (provider from runtimeConfig.aiProvider) ---
+    const extractInput: ExtractReceiptInput = {}
 
     if (receipt.imageUrl) {
       // Fetch image from Supabase Storage as base64
@@ -100,49 +61,14 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
       if (error || !imageData) throw new Error(`Failed to fetch image: ${error?.message}`)
 
       const arrayBuffer = await imageData.arrayBuffer()
-      const base64 = Buffer.from(arrayBuffer).toString('base64')
-
-      messages.push({
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/jpeg', data: base64 },
-          },
-          { type: 'text', text: 'Extract all receipt data. For receipt_datetime use ISO 8601. If date not shown use today. Quantities default to 1.' },
-        ],
-      })
-    } else if (receipt.rawText) {
-      messages.push({
-        role: 'user',
-        content: receipt.rawText,
-      })
+      extractInput.imageBase64 = Buffer.from(arrayBuffer).toString('base64')
+      extractInput.mediaType = imageData.type || undefined
+    }
+    else if (receipt.rawText) {
+      extractInput.text = receipt.rawText
     }
 
-    const claudeResponse = await claude.messages.create({
-      model: 'claude-opus-4-5',
-      max_tokens: 4096,
-      system: `You are a receipt data extraction specialist. Extract structured data from receipts.
-- raw_name: exact text on receipt
-- generalized_name: normalized human-readable name (e.g. "2% Milk 1L" not "MLK 2% 1LT SKU#4821")
-- Remove store codes, normalize spacing
-- Assign the most specific applicable category
-- If a field is missing from the receipt, omit it from the JSON`,
-      messages,
-      tools: [
-        {
-          name: 'extract_receipt',
-          description: 'Extract structured receipt data',
-          input_schema: RECEIPT_SCHEMA as any,
-        },
-      ],
-      tool_choice: { type: 'any' },
-    })
-
-    // Extract tool use result
-    const toolUse = claudeResponse.content.find((b: Anthropic.ContentBlock) => b.type === 'tool_use') as Anthropic.ToolUseBlock | undefined
-    if (!toolUse) throw new Error('Claude did not return structured data')
-    extractedData = toolUse.input as any
+    const extractedData = await extractReceipt(extractInput)
 
     // --- Step 2: Update receipt metadata ---
     await db.update(receipts).set({
@@ -154,21 +80,28 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
       total: extractedData.total.toString(),
     }).where(eq(receipts.id, receiptId))
 
-    // --- Step 3: Voyage AI embeddings ---
-    const items = extractedData.items || []
+    // --- Step 3: Voyage AI embeddings (optional) ---
+    // Skipped when VOYAGE_API_KEY is unset (e.g. fully local Ollama setup);
+    // items are still saved, just without price comparison.
+    const items = extractedData.items
 
-    // Batch embed all item names
-    const textsToEmbed = items.map((item: any) =>
+    const textsToEmbed = items.map(item =>
       [item.generalized_name, item.brand_name].filter(Boolean).join(' '),
     )
 
     let embeddings: number[][] = []
-    if (textsToEmbed.length > 0) {
-      const embeddingResult = await voyage.embed({
-        input: textsToEmbed,
-        model: 'voyage-3-lite',
-      })
-      embeddings = embeddingResult.data?.map((d: any) => d.embedding as number[]) || []
+    if (textsToEmbed.length > 0 && config.voyageApiKey) {
+      try {
+        const embeddingResult = await useVoyageClient().embed({
+          input: textsToEmbed,
+          model: 'voyage-3-lite',
+        })
+        embeddings = embeddingResult.data?.map((d: any) => d.embedding as number[]) || []
+      }
+      catch (embedErr: any) {
+        console.warn(`[process] Voyage embedding failed for receipt ${receiptId}; saving items without price comparison:`, embedErr?.message || embedErr)
+        embeddings = []
+      }
     }
 
     // --- Step 4: Load categories for lookup ---
@@ -178,8 +111,7 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
     // --- Step 5: For each item, find similar historical items and compute price indicator ---
     const insertedItems = []
 
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]
+    for (const [i, item] of items.entries()) {
       const embedding = embeddings[i] || null
       const category = categoryMap.get(item.category)
 
@@ -188,7 +120,7 @@ export default defineEventHandler(async (event): Promise<ProcessReceiptResponse>
       let historicalAvgPrice: number | null = null
       let similarItemsCount = 0
 
-      if (embedding && embedding.length > 0) {
+      if (embedding && embedding.length > 0 && item.unit_price > 0) {
         const similar = await findSimilarItems(db, user.id, embedding)
         similarItemsCount = similar.length
 

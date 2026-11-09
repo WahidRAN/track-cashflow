@@ -17,8 +17,10 @@ export function useReceipt() {
         })
         receiptId = res.receiptId
       } else {
+        // Downscale big phone photos (local vision models + Claude's ~5MB limit)
+        const resized = await resizeImage(input)
         const formData = new FormData()
-        formData.append('image', input, 'receipt.jpg')
+        formData.append('image', resized, 'receipt.jpg')
         const res = await $fetch<{ receiptId: string }>('/api/receipts', {
           method: 'POST',
           body: formData,
