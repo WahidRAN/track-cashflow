@@ -29,13 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: typecheck
     env:
-      # Dummy values so Nuxt config doesn't error on missing env
+      # Placeholders only: the build never connects to Supabase, Postgres or the AI APIs,
+      # they just silence the @nuxtjs/supabase "missing env" warnings.
       NUXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
-      NUXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder
-      ANTHROPIC_API_KEY: sk-ant-placeholder
-      VOYAGE_API_KEY: pa-placeholder
-      DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+      NUXT_PUBLIC_SUPABASE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder
       SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder
+      DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+      ANTHROPIC_API_KEY: sk-ant-placeholder
     steps:
       - uses: actions/checkout@v4
 
@@ -49,4 +49,3 @@ jobs:
 
       - name: Build
         run: npx nuxi build
-        continue-on-error: true  # Build may fail without real Supabase — that's OK in CI

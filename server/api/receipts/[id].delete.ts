@@ -1,30 +1,28 @@
-import { serverSupabaseUser } from '#supabase/server'
+import { and, eq } from 'drizzle-orm'
+import { requireUserId } from '~/server/utils/auth'
 import { useDb } from '~/server/utils/db'
 import { useSupabaseAdmin } from '~/server/utils/supabase'
+import { notFound, requireUuidParam } from '~/server/utils/request'
+import { RECEIPTS_BUCKET, toStoragePath } from '~/server/utils/receiptDto'
 import { receipts } from '~/db/schema'
-import { eq, and } from 'drizzle-orm'
 
 export default defineEventHandler(async (event) => {
-  const user = await serverSupabaseUser(event)
-  if (!user) throw createError({ statusCode: 401, message: 'Unauthorized' })
+  const userId = await requireUserId(event)
+  const id = requireUuidParam(event)
 
-  const id = getRouterParam(event, 'id')!
-  const db = useDb()
-  const supabaseAdmin = useSupabaseAdmin()
+  // Items are removed by ON DELETE CASCADE
+  const [deleted] = await useDb()
+    .delete(receipts)
+    .where(and(eq(receipts.id, id), eq(receipts.userId, userId)))
+    .returning({ imageUrl: receipts.imageUrl })
+  if (!deleted) throw notFound('Receipt not found')
 
-  const receiptRows = await db.select().from(receipts)
-    .where(and(eq(receipts.id, id), eq(receipts.userId, user.id)))
-  const receipt = receiptRows[0]
-
-  if (!receipt) throw createError({ statusCode: 404, message: 'Receipt not found' })
-
-  // Delete from storage if image exists
-  if (receipt.imageUrl) {
-    const path = `${user.id}/${id}`
-    await supabaseAdmin.storage.from('receipts').remove([`${path}/original.jpg`])
+  if (deleted.imageUrl) {
+    const { error } = await useSupabaseAdmin().storage
+      .from(RECEIPTS_BUCKET)
+      .remove([toStoragePath(deleted.imageUrl)])
+    if (error) console.warn(`[delete] could not remove image for receipt ${id}:`, error.message)
   }
-
-  await db.delete(receipts).where(and(eq(receipts.id, id), eq(receipts.userId, user.id)))
 
   return { success: true }
 })

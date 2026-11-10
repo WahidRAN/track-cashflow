@@ -1,99 +1,74 @@
-import { serverSupabaseUser } from '#supabase/server'
-import { useDb, findSimilarItems } from '~/server/utils/db'
-import { useVoyageClient } from '~/server/utils/voyage'
-import { receiptItems } from '~/db/schema'
-import { eq, and } from 'drizzle-orm'
-import { sql } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
+import { requireUserId } from '~/server/utils/auth'
+import { useDb, comparePrice, priceComparisonColumns } from '~/server/utils/db'
+import { normalizeGeneralizedName } from '~/server/utils/pricing'
+import {
+  MAX_MONEY, MAX_QUANTITY, badRequest, notFound, readJsonObject, readNumberField, readStringField, requireUuidParam,
+} from '~/server/utils/request'
+import { toReceiptItemDto } from '~/server/utils/receiptDto'
+import { categories, receiptItems } from '~/db/schema'
+import type { ReceiptItem } from '~/types/api'
 
-export default defineEventHandler(async (event) => {
-  const user = await serverSupabaseUser(event)
-  if (!user) throw createError({ statusCode: 401, message: 'Unauthorized' })
+const money = { min: -MAX_MONEY, max: MAX_MONEY }
 
-  const id = getRouterParam(event, 'id')!
-  const body = await readBody(event)
+/**
+ * Update a receipt item. Body: UpdateItemBody (all fields optional).
+ * generalizedName is normalized; changing it or unitPrice recomputes the price indicator.
+ */
+export default defineEventHandler(async (event): Promise<ReceiptItem> => {
+  const userId = await requireUserId(event)
+  const id = requireUuidParam(event)
+  const body = await readJsonObject(event)
   const db = useDb()
 
-  const existingRows = await db.select().from(receiptItems)
-    .where(and(eq(receiptItems.id, id), eq(receiptItems.userId, user.id)))
-  const existing = existingRows[0]
+  const where = and(eq(receiptItems.id, id), eq(receiptItems.userId, userId))
+  const [existing] = await db.select().from(receiptItems).where(where)
+  if (!existing) throw notFound('Item not found')
 
-  if (!existing) throw createError({ statusCode: 404, message: 'Item not found' })
+  const updates: Partial<typeof receiptItems.$inferInsert> = {}
 
-  const nameChanged = body.generalizedName && body.generalizedName !== existing.generalizedName
-
-  // If name changed, regenerate embedding and recompute price comparison
-  if (nameChanged) {
-    const voyage = useVoyageClient()
-    const textToEmbed = [body.generalizedName, body.brandName || existing.brandName].filter(Boolean).join(' ')
-
-    const result = await voyage.embed({ input: [textToEmbed], model: 'voyage-3-lite' })
-    const embedding = result.data?.[0]?.embedding as number[] | undefined
-
-    let priceIndicator: string | null = null
-    let pricePercentDiff: number | null = null
-    let historicalAvgPrice: number | null = null
-    let similarItemsCount = 0
-
-    if (embedding) {
-      const similar = await findSimilarItems(db, user.id, embedding)
-      similarItemsCount = similar.length
-      if (similar.length > 0) {
-        const avg = similar.reduce((s: number, x: { unit_price: string; similarity: number }) => s + parseFloat(x.unit_price), 0) / similar.length
-        historicalAvgPrice = Math.round(avg * 100) / 100
-        const diff = ((Number(body.unitPrice ?? existing.unitPrice) - avg) / avg) * 100
-        pricePercentDiff = Math.round(diff * 10) / 10
-        priceIndicator = diff < -5 ? 'cheaper' : diff > 5 ? 'expensive' : 'similar'
-      }
-
-      const vectorStr = `[${embedding.join(',')}]`
-      await db.execute(sql`
-        UPDATE receipt_items SET
-          generalized_name = ${body.generalizedName ?? existing.generalizedName},
-          brand_name = ${body.brandName ?? existing.brandName ?? null},
-          unit_price = ${(body.unitPrice ?? existing.unitPrice).toString()},
-          line_total = ${(body.lineTotal ?? existing.lineTotal).toString()},
-          quantity = ${(body.quantity ?? existing.quantity ?? 1).toString()},
-          category_name = ${body.categoryName ?? existing.categoryName},
-          embedding = ${vectorStr}::vector,
-          price_indicator = ${priceIndicator},
-          price_percent_diff = ${pricePercentDiff?.toString() ?? null},
-          historical_avg_price = ${historicalAvgPrice?.toString() ?? null},
-          similar_items_count = ${similarItemsCount}
-        WHERE id = ${id}::uuid AND user_id = ${user.id}::uuid
-      `)
-    }
-  }
-  else {
-    // Simple update without re-embedding
-    await db.update(receiptItems).set({
-      generalizedName: body.generalizedName ?? existing.generalizedName,
-      brandName: body.brandName !== undefined ? body.brandName : existing.brandName,
-      unitPrice: body.unitPrice?.toString() ?? existing.unitPrice,
-      lineTotal: body.lineTotal?.toString() ?? existing.lineTotal,
-      quantity: body.quantity?.toString() ?? existing.quantity,
-      categoryName: body.categoryName ?? existing.categoryName,
-    }).where(and(eq(receiptItems.id, id), eq(receiptItems.userId, user.id)))
+  const generalizedName = readStringField(body, 'generalizedName', { maxLength: 200 })
+  if (generalizedName) {
+    const normalized = normalizeGeneralizedName(generalizedName)
+    if (!normalized) throw badRequest('generalizedName must not be empty')
+    updates.generalizedName = normalized
   }
 
-  const updatedRows = await db.select().from(receiptItems).where(eq(receiptItems.id, id))
-  const updated = updatedRows[0]
-  if (!updated) throw createError({ statusCode: 404, message: 'Item not found after update' })
-  return {
-    id: updated.id,
-    receiptId: updated.receiptId,
-    rawName: updated.rawName,
-    generalizedName: updated.generalizedName,
-    brandName: updated.brandName ?? null,
-    quantity: updated.quantity ? Number(updated.quantity) : 1,
-    unitPrice: Number(updated.unitPrice),
-    lineTotal: Number(updated.lineTotal),
-    taxAmount: updated.taxAmount ? Number(updated.taxAmount) : 0,
-    categoryId: updated.categoryId ?? null,
-    categoryName: updated.categoryName ?? null,
-    priceIndicator: updated.priceIndicator as 'cheaper' | 'similar' | 'expensive' | null,
-    pricePercentDiff: updated.pricePercentDiff ? Number(updated.pricePercentDiff) : null,
-    historicalAvgPrice: updated.historicalAvgPrice ? Number(updated.historicalAvgPrice) : null,
-    similarItemsCount: updated.similarItemsCount ?? 0,
-    createdAt: updated.createdAt.toISOString(),
+  const brandName = readStringField(body, 'brandName', { nullable: true, maxLength: 100 })
+  if (brandName !== undefined) updates.brandName = brandName
+
+  const quantity = readNumberField(body, 'quantity', { min: 0.01, max: MAX_QUANTITY })
+  if (quantity != null) updates.quantity = String(quantity)
+
+  const unitPrice = readNumberField(body, 'unitPrice', money)
+  if (unitPrice != null) updates.unitPrice = String(unitPrice)
+
+  const lineTotal = readNumberField(body, 'lineTotal', money)
+  if (lineTotal != null) updates.lineTotal = String(lineTotal)
+
+  const taxAmount = readNumberField(body, 'taxAmount', { nullable: true, ...money })
+  if (taxAmount !== undefined) updates.taxAmount = String(taxAmount ?? 0)
+
+  // Keep category_id in sync with the name — analytics group and join on it
+  const categoryName = readStringField(body, 'categoryName', { nullable: true, maxLength: 50 })
+  if (categoryName !== undefined) {
+    const [category] = categoryName
+      ? await db.select({ id: categories.id, name: categories.name }).from(categories).where(eq(categories.name, categoryName))
+      : []
+    updates.categoryName = category?.name ?? categoryName
+    updates.categoryId = category?.id ?? null
   }
+
+  const nextName = updates.generalizedName ?? existing.generalizedName
+  const nextUnitPrice = unitPrice ?? Number(existing.unitPrice)
+  if (nextName !== existing.generalizedName || nextUnitPrice !== Number(existing.unitPrice)) {
+    const comparison = await comparePrice(db, userId, nextName, nextUnitPrice, { excludeReceiptId: existing.receiptId })
+    Object.assign(updates, priceComparisonColumns(comparison))
+  }
+
+  if (Object.keys(updates).length === 0) return toReceiptItemDto(existing)
+
+  const [updated] = await db.update(receiptItems).set(updates).where(where).returning()
+  if (!updated) throw notFound('Item not found')
+  return toReceiptItemDto(updated)
 })

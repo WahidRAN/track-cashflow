@@ -115,11 +115,12 @@ Use `OLLAMA_BASE_URL=http://localhost:11434`.
 
 ## 6. RAM budget (16 GB)
 
-Ollama (Windows), WSL2 (Nuxt + Node) and your browser all share 16 GB.
+Ollama (Windows), WSL2 (Nuxt + Node + the Docker Desktop Supabase stack) and your browser all share 16 GB.
 
-- **Cap WSL memory** with `memory=6GB` in `.wslconfig` (above). Without a cap, WSL can claim up to half of RAM and keep it cached.
-- **Close heavy apps** (extra browser tabs, games, Docker Desktop if unused) while processing receipts.
-- **Use the Supabase cloud free tier** instead of running Supabase locally in Docker. That saves roughly 3 GB.
+- **Cap WSL memory** with `memory=6GB` in `.wslconfig` (above). Docker Desktop's WSL2 backend runs in the same VM, so this cap covers the Supabase containers too. Without a cap, WSL can claim up to half of RAM and keep it cached.
+- **The local Supabase stack is trimmed** in `supabase/config.toml`: Studio, Realtime, Edge Functions and Analytics are off. That leaves about 0.4 GB in use while idle. Run `npm run db:stop` when you aren't using the app, and quit Docker Desktop to free its VM overhead as well.
+- **Close heavy apps** (extra browser tabs, games) while processing receipts.
+- **Use the Supabase cloud free tier** instead of the local stack if RAM is still tight. See the "Hosted" block in `.env.example`.
 - **Drop to `qwen2.5vl:3b`** if Task Manager shows memory near 100% or the disk is busy swapping. A swapping 7B model is far slower than the 3B one.
 
 ## 7. `.env` for local mode
@@ -134,11 +135,10 @@ OLLAMA_MODEL=qwen2.5vl:7b                # or qwen2.5vl:3b
 # Not needed when AI_PROVIDER=ollama
 ANTHROPIC_API_KEY=
 
-# Optional. Leave empty to skip embeddings / price comparison entirely
-VOYAGE_API_KEY=
-
-# Supabase vars are still required (see .env.example)
+# Keep the Supabase "Local" block from .env.example (npm run db:start)
 ```
+
+With `AI_PROVIDER=ollama` and the local Supabase stack, nothing leaves your machine. Price comparison works the same with both providers: it matches previous purchases by item name in your own database.
 
 Restart `npm run dev` after changing `.env`.
 

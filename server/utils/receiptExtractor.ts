@@ -1,5 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { useAnthropicClient } from '~/server/utils/claude'
+import { normalizeGeneralizedName } from '~/server/utils/pricing'
+import { DEFAULT_TIMEZONE, formatDateInZone, parseDateTimeInZone } from '~/server/utils/datetime'
+import { MAX_MONEY, MAX_QUANTITY } from '~/server/utils/request'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,6 +19,7 @@ export type AiProvider = 'claude' | 'ollama'
 
 export interface ExtractedReceiptItem {
   raw_name: string
+  /** Normalized with normalizeGeneralizedName() — the price-history match key */
   generalized_name: string
   brand_name?: string
   quantity: number
@@ -28,7 +32,7 @@ export interface ExtractedReceiptItem {
 export interface ExtractedReceipt {
   store_name: string
   store_address?: string
-  /** ISO 8601 — always a valid, parseable datetime after normalization */
+  /** ISO 8601 UTC instant — the receipt's local time read in the receipt timezone */
   receipt_datetime: string
   subtotal?: number
   tax_total?: number
@@ -41,6 +45,15 @@ export interface ExtractReceiptInput {
   /** MIME type of the image (e.g. Blob.type). Falls back to image/jpeg. */
   mediaType?: string
   text?: string
+  /** IANA timezone the receipt's printed (local) time is in. Default Asia/Tokyo. */
+  timezone?: string
+  /** Current time (for "today" and sanity checks); injectable for tests */
+  now?: Date
+}
+
+export interface NormalizeOptions {
+  timezone?: string
+  now?: Date
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +66,10 @@ export const RECEIPT_SCHEMA = {
   properties: {
     store_name: { type: 'string' },
     store_address: { type: 'string' },
-    receipt_datetime: { type: 'string', description: 'ISO 8601 datetime, best guess if not shown' },
+    receipt_datetime: {
+      type: 'string',
+      description: 'Local date/time as printed on the receipt, ISO 8601 WITHOUT timezone offset, e.g. 2025-01-05T14:32:00',
+    },
     subtotal: { type: 'number' },
     tax_total: { type: 'number' },
     total: { type: 'number' },
@@ -65,7 +81,7 @@ export const RECEIPT_SCHEMA = {
           raw_name: { type: 'string', description: 'Exact text from receipt (keep original Japanese)' },
           generalized_name: {
             type: 'string',
-            description: 'Lowercase English, brand removed, product type + size, e.g. "milk 1 litre", "eggs 10 pieces"',
+            description: 'Lowercase English, brand removed, product type + size, e.g. "milk 1 litre", "milk 500ml", "eggs 10 pieces"',
           },
           brand_name: { type: 'string' },
           quantity: { type: 'number' },
@@ -91,18 +107,23 @@ Receipts are mostly Japanese (e.g. Gyomu Super / 業務スーパー, Welcia / �
 
 Field rules:
 - raw_name: the exact item text as printed on the receipt, keeping the original Japanese.
-- generalized_name: lowercase English, brand removed, product type + size/amount when known. Examples: "milk 1 litre", "milk 500ml", "eggs 10 pieces", "chicken breast 500g", "toilet paper 12 rolls". Never include brand names, store codes, or Japanese text in this field.
+- generalized_name: lowercase English, brand removed, product type + size/amount when known. It is used to compare prices across brands and stores, so the same kind of product in the same size MUST get the identical text (e.g. "midori milk 1L" at Gyomu Super and another brand's 1L milk at Lopia are both "milk 1 litre"). Use the simplest common product name. Size formats: "1 litre" (whole litres), "500ml", "1kg" (whole kilograms), "500g", "10 pieces", "12 rolls". Examples: "milk 1 litre", "milk 500ml", "eggs 10 pieces", "chicken breast 500g", "rice 5kg", "toilet paper 12 rolls". Never include brand names, store codes, or Japanese text in this field.
 - brand_name: the brand if identifiable, otherwise omit.
 - quantity: number of units (default 1). unit_price: price per unit in yen. line_total: total for the line in yen.
 - Discounts (値引 / 割引) apply to the item above them; reflect them in that item's line_total when clear.
 - Numbers must be plain JSON numbers (198, not "¥198" or "1,280").
 - total: the final amount paid (合計). subtotal (小計) and tax_total (消費税等) when shown.
-- receipt_datetime: ISO 8601. Japanese receipts may use 2025年1月5日 or Reiwa era dates (令和7年 = 2025).
+- receipt_datetime: the local date and time exactly as printed, ISO 8601 without a timezone offset (e.g. "2025-01-05T14:32:00"). Japanese receipts may use 2025年1月5日 or Reiwa era dates (令和7年 = 2025). If only a date is printed, use 00:00 for the time.
 - Assign the most specific applicable category.
 - Remove store codes, normalize spacing.
 - If a field is missing from the receipt, omit it from the JSON.`
 
-const IMAGE_INSTRUCTION = 'Extract all receipt data. For receipt_datetime use ISO 8601. If date not shown use today. Quantities default to 1.'
+const IMAGE_INSTRUCTION = 'Extract all receipt data. For receipt_datetime use the printed local time in ISO 8601 without offset. If no date is shown use today\'s date. Quantities default to 1.'
+
+/** System prompt plus today's date — the model can't know it otherwise (missing dates / years) */
+export function buildSystemPrompt(now: Date, timezone: string): string {
+  return `${SYSTEM_PROMPT}\n\nToday's date is ${formatDateInZone(now, timezone)} (receipts are in the ${timezone} timezone).`
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -126,10 +147,13 @@ export async function extractReceipt(input: ExtractReceiptInput): Promise<Extrac
     throw new Error('Receipt has no image or text to extract from')
   }
   const provider = getAiProvider()
+  const timezone = input.timezone || DEFAULT_TIMEZONE
+  const now = input.now ?? new Date()
+  const systemPrompt = buildSystemPrompt(now, timezone)
   const raw = provider === 'ollama'
-    ? await extractWithOllama(input)
-    : await extractWithClaude(input)
-  return normalizeExtractedReceipt(raw)
+    ? await extractWithOllama(input, systemPrompt)
+    : await extractWithClaude(input, systemPrompt)
+  return normalizeExtractedReceipt(raw, { timezone, now })
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +169,7 @@ function toClaudeMediaType(mediaType?: string): ClaudeImageMediaType {
   return (CLAUDE_MEDIA_TYPES.includes(t) ? t : 'image/jpeg') as ClaudeImageMediaType
 }
 
-async function extractWithClaude(input: ExtractReceiptInput): Promise<unknown> {
+async function extractWithClaude(input: ExtractReceiptInput, systemPrompt: string): Promise<unknown> {
   const config = useRuntimeConfig()
   const claude = useAnthropicClient()
 
@@ -168,8 +192,9 @@ async function extractWithClaude(input: ExtractReceiptInput): Promise<unknown> {
 
   const response = await claude.messages.create({
     model: String(config.claudeModel || 'claude-opus-4-5'),
-    max_tokens: 4096,
-    system: SYSTEM_PROMPT,
+    // Long supermarket receipts (40+ lines) don't fit in 4096 output tokens
+    max_tokens: 8192,
+    system: systemPrompt,
     messages,
     tools: [
       {
@@ -184,6 +209,9 @@ async function extractWithClaude(input: ExtractReceiptInput): Promise<unknown> {
   const toolUse = response.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
   )
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error('Receipt too long: Claude ran out of output tokens before finishing')
+  }
   if (!toolUse) throw new Error('Claude did not return structured data')
   return toolUse.input
 }
@@ -195,7 +223,7 @@ interface OllamaChatResponse {
 
 const OLLAMA_TIMEOUT_MS = 180_000
 
-async function extractWithOllama(input: ExtractReceiptInput): Promise<unknown> {
+async function extractWithOllama(input: ExtractReceiptInput, systemPrompt: string): Promise<unknown> {
   const config = useRuntimeConfig()
   const baseUrl = String(config.ollamaBaseUrl || 'http://localhost:11434').replace(/\/+$/, '')
   const model = String(config.ollamaModel || 'qwen2.5vl:7b')
@@ -216,7 +244,7 @@ async function extractWithOllama(input: ExtractReceiptInput): Promise<unknown> {
         format: RECEIPT_SCHEMA,
         options: { temperature: 0 },
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: systemPrompt },
           userMessage,
         ],
       },
@@ -280,21 +308,35 @@ function toCategory(value: unknown): ReceiptCategory {
   return CATEGORY_LOOKUP.get(key) ?? 'Other'
 }
 
-function toIsoDatetime(value: unknown): string {
-  if (typeof value === 'string' && value.trim()) {
-    const d = new Date(value.trim())
-    if (!Number.isNaN(d.getTime())) return d.toISOString()
-  }
-  return new Date().toISOString()
+const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000
+
+/**
+ * The AI reports the receipt's printed local time. Any offset it adds is
+ * invented ("Z" is common), so it's discarded and the wall time is read in
+ * the receipt timezone. Unparsable or implausible dates fall back to now.
+ */
+function toIsoDatetime(value: unknown, timezone: string, now: Date): string {
+  const d = typeof value === 'string' ? parseDateTimeInZone(value, timezone, { ignoreOffset: true }) : null
+  // Year < 2000 = era year read as AD (令和7 → 0007); far future = misread digits
+  if (!d || d.getUTCFullYear() < 2000 || d.getTime() > now.getTime() + TWO_DAYS_MS) return now.toISOString()
+  return d.toISOString()
 }
 
-export function normalizeExtractedReceipt(raw: unknown): ExtractedReceipt {
+/** Money within the NUMERIC(10,2) column range, else undefined (e.g. a barcode read as a price) */
+function toMoney(value: unknown): number | undefined {
+  const n = toNumber(value)
+  return n !== undefined && Math.abs(n) <= MAX_MONEY ? n : undefined
+}
+
+export function normalizeExtractedReceipt(raw: unknown, opts: NormalizeOptions = {}): ExtractedReceipt {
+  const timezone = opts.timezone || DEFAULT_TIMEZONE
+  const now = opts.now ?? new Date()
   if (!raw || typeof raw !== 'object') throw new Error('AI returned no receipt data')
   const data = raw as Record<string, unknown>
 
   if (!Array.isArray(data.items)) throw new Error('AI response is missing an items array')
 
-  const total = toNumber(data.total)
+  const total = toMoney(data.total)
   if (total === undefined) throw new Error('AI response has no valid receipt total')
 
   const items: ExtractedReceiptItem[] = []
@@ -309,22 +351,23 @@ export function normalizeExtractedReceipt(raw: unknown): ExtractedReceipt {
 
     const quantity = (() => {
       const q = toNumber(it.quantity)
-      return q !== undefined && q > 0 ? q : 1
+      return q !== undefined && q > 0 && q <= MAX_QUANTITY ? q : 1
     })()
-    let unitPrice = toNumber(it.unit_price)
-    let lineTotal = toNumber(it.line_total)
+    let unitPrice = toMoney(it.unit_price)
+    let lineTotal = toMoney(it.line_total)
     if (unitPrice === undefined && lineTotal === undefined) continue
-    if (unitPrice === undefined) unitPrice = lineTotal! / quantity
-    if (lineTotal === undefined) lineTotal = unitPrice * quantity
+    if (unitPrice === undefined) unitPrice = Math.round((lineTotal! / quantity) * 100) / 100
+    if (lineTotal === undefined) lineTotal = Math.round(unitPrice * quantity * 100) / 100
+    if (Math.abs(lineTotal) > MAX_MONEY) continue
 
     items.push({
       raw_name: name,
-      generalized_name: (generalizedName ?? name).toLowerCase(),
+      generalized_name: normalizeGeneralizedName(generalizedName ?? name) || name.toLowerCase(),
       brand_name: toStr(it.brand_name),
       quantity,
       unit_price: unitPrice,
       line_total: lineTotal,
-      tax_amount: toNumber(it.tax_amount) ?? 0,
+      tax_amount: toMoney(it.tax_amount) ?? 0,
       category: toCategory(it.category),
     })
   }
@@ -332,9 +375,9 @@ export function normalizeExtractedReceipt(raw: unknown): ExtractedReceipt {
   return {
     store_name: toStr(data.store_name) ?? 'Unknown store',
     store_address: toStr(data.store_address),
-    receipt_datetime: toIsoDatetime(data.receipt_datetime),
-    subtotal: toNumber(data.subtotal),
-    tax_total: toNumber(data.tax_total),
+    receipt_datetime: toIsoDatetime(data.receipt_datetime, timezone, now),
+    subtotal: toMoney(data.subtotal),
+    tax_total: toMoney(data.tax_total),
     total,
     items,
   }

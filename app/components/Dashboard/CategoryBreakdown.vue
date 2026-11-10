@@ -9,10 +9,16 @@
     <template v-else>
       <!-- Donut chart -->
       <div class="relative w-48 h-48 mx-auto mb-4">
-        <Doughnut :data="chartData" :options="chartOptions" />
+        <!-- Canvas chart is client-only; keep the same footprint during SSR -->
+        <ClientOnly>
+          <Doughnut :data="chartData" :options="chartOptions" />
+          <template #fallback>
+            <div class="w-full h-full rounded-full border-[14px] border-gray-100 dark:border-gray-700" />
+          </template>
+        </ClientOnly>
         <!-- Center label -->
         <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <p class="text-2xl font-bold text-gray-900 dark:text-white">{{ formatCurrency(total) }}</p>
+          <p class="text-xl font-bold text-gray-900 dark:text-white">{{ formatCurrency(total) }}</p>
           <p class="text-xs text-gray-400">total</p>
         </div>
       </div>
@@ -35,7 +41,7 @@
             {{ formatCurrency(cat.total) }}
           </span>
           <span class="text-xs text-gray-400 flex-shrink-0 w-10 text-right">
-            {{ Math.round((cat.total / total) * 100) }}%
+            {{ percentOf(cat.total) }}%
           </span>
         </div>
       </div>
@@ -60,6 +66,8 @@ const props = defineProps<{
   total: number
 }>()
 
+const { formatCurrency } = useFormat()
+
 const chartColors = [
   '#10b981', // emerald
   '#3b82f6', // blue
@@ -71,7 +79,7 @@ const chartColors = [
   '#84cc16', // lime
 ]
 
-const topCategories = computed(() => props.categories.slice(0, 8))
+const topCategories = computed(() => props.categories.filter(c => c.total > 0).slice(0, 8))
 
 const chartData = computed(() => ({
   labels: topCategories.value.map(c => c.categoryName),
@@ -93,16 +101,16 @@ const chartOptions = {
     legend: { display: false },
     tooltip: {
       callbacks: {
-        label: (ctx: any) => {
+        label: (ctx: { parsed: number }) => {
           const val = ctx.parsed
-          return ` ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val)}`
+          return ` ${formatCurrency(val)}`
         },
       },
     },
   },
 }
 
-function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount)
+function percentOf(amount: number): number {
+  return props.total > 0 ? Math.round((amount / props.total) * 100) : 0
 }
 </script>

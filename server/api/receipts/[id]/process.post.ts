@@ -1,224 +1,147 @@
-import { serverSupabaseUser } from '#supabase/server'
+import { and, count, eq, gt, lt, ne, or } from 'drizzle-orm'
+import { requireUserId } from '~/server/utils/auth'
 import { extractReceipt } from '~/server/utils/receiptExtractor'
 import type { ExtractReceiptInput } from '~/server/utils/receiptExtractor'
-import { useVoyageClient } from '~/server/utils/voyage'
-import { useDb, findSimilarItems } from '~/server/utils/db'
+import { useDb, getPriceHistory, priceComparisonColumns } from '~/server/utils/db'
 import { useSupabaseAdmin } from '~/server/utils/supabase'
-import { receipts, categories } from '~/db/schema'
-import { eq, and } from 'drizzle-orm'
-import { sql } from 'drizzle-orm'
+import { resolveTimezone } from '~/server/utils/datetime'
+import { notFound, requireUuidParam } from '~/server/utils/request'
+import { RECEIPTS_BUCKET, toReceiptDto, toReceiptItemDto, toStoragePath } from '~/server/utils/receiptDto'
+import { computePriceIndicator } from '~/server/utils/pricing'
+import { receipts, receiptItems, categories } from '~/db/schema'
 import type { ProcessReceiptResponse } from '~/types/api'
 
+const DAILY_LIMIT = 50
+const DAY_MS = 24 * 60 * 60 * 1000
+/** A receipt stuck in 'processing' longer than this (crashed run) may be processed again */
+const STALE_PROCESSING_MS = 5 * 60 * 1000
+
+/**
+ * Run AI extraction on a pending receipt, compute price indicators from the
+ * user's price history (exact generalized-name match) and store the items.
+ * Safe to call again on a processed / failed receipt: items are replaced.
+ */
 export default defineEventHandler(async (event): Promise<ProcessReceiptResponse> => {
-  const user = await serverSupabaseUser(event)
-  if (!user) throw createError({ statusCode: 401, message: 'Unauthorized' })
-
-  const receiptId = getRouterParam(event, 'id')!
+  const userId = await requireUserId(event)
+  const receiptId = requireUuidParam(event)
+  const timezone = resolveTimezone(event)
   const db = useDb()
-  const supabaseAdmin = useSupabaseAdmin()
-  const config = useRuntimeConfig()
 
-  // Load receipt
-  const receiptRows = await db.select().from(receipts)
-    .where(and(eq(receipts.id, receiptId), eq(receipts.userId, user.id)))
-  const receipt = receiptRows[0]
+  const [receipt] = await db.select().from(receipts)
+    .where(and(eq(receipts.id, receiptId), eq(receipts.userId, userId)))
+  if (!receipt) throw notFound('Receipt not found')
 
-  if (!receipt) throw createError({ statusCode: 404, message: 'Receipt not found' })
-
-  // Rate limit: 50 AI processing calls per 24 hours
-  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
-  const countResult = await db.execute(sql`
-    SELECT COUNT(*)::int AS count
-    FROM receipts
-    WHERE user_id = ${user.id}::uuid
-      AND processing_status = 'done'
-      AND updated_at > ${oneDayAgo}
-  `)
-  const processedToday = Number((countResult as any)[0]?.count ?? 0)
-  if (processedToday >= 50) {
+  // Rate limit: 50 processed receipts per 24 hours
+  const [usage] = await db.select({ processed: count() }).from(receipts)
+    .where(and(
+      eq(receipts.userId, userId),
+      eq(receipts.processingStatus, 'done'),
+      gt(receipts.updatedAt, new Date(Date.now() - DAY_MS)),
+    ))
+  if ((usage?.processed ?? 0) >= DAILY_LIMIT) {
     throw createError({
       statusCode: 429,
-      message: 'Daily limit reached (50 receipts/day). Try again tomorrow.',
+      statusMessage: 'Too Many Requests',
+      message: `Daily limit reached (${DAILY_LIMIT} receipts/day). Try again tomorrow.`,
     })
   }
 
-  // Mark as processing
-  await db.update(receipts).set({ processingStatus: 'processing' }).where(eq(receipts.id, receiptId))
+  // Claim atomically so a double-submit can't process (and insert items) twice
+  const claimed = await db.update(receipts)
+    .set({ processingStatus: 'processing' })
+    .where(and(
+      eq(receipts.id, receiptId),
+      eq(receipts.userId, userId),
+      or(
+        ne(receipts.processingStatus, 'processing'),
+        lt(receipts.updatedAt, new Date(Date.now() - STALE_PROCESSING_MS)),
+      ),
+    ))
+    .returning({ id: receipts.id })
+  if (claimed.length === 0) {
+    throw createError({ statusCode: 409, statusMessage: 'Conflict', message: 'This receipt is already being processed' })
+  }
 
   try {
-    // --- Step 1: AI extraction (provider from runtimeConfig.aiProvider) ---
-    const extractInput: ExtractReceiptInput = {}
-
+    // --- 1. AI extraction (provider from runtimeConfig.aiProvider) ---
+    const extractInput: ExtractReceiptInput = { timezone }
     if (receipt.imageUrl) {
-      // Fetch image from Supabase Storage as base64
-      const urlParts = receipt.imageUrl.split('/storage/v1/object/public/receipts/')
-      const storagePath = urlParts[1] ?? ''
-
-      const { data: imageData, error } = await supabaseAdmin.storage
-        .from('receipts')
-        .download(storagePath)
-
-      if (error || !imageData) throw new Error(`Failed to fetch image: ${error?.message}`)
-
-      const arrayBuffer = await imageData.arrayBuffer()
-      extractInput.imageBase64 = Buffer.from(arrayBuffer).toString('base64')
+      const { data: imageData, error } = await useSupabaseAdmin().storage
+        .from(RECEIPTS_BUCKET)
+        .download(toStoragePath(receipt.imageUrl))
+      if (error || !imageData) throw new Error(`Failed to fetch receipt image: ${error?.message ?? 'not found'}`)
+      extractInput.imageBase64 = Buffer.from(await imageData.arrayBuffer()).toString('base64')
       extractInput.mediaType = imageData.type || undefined
     }
     else if (receipt.rawText) {
       extractInput.text = receipt.rawText
     }
 
-    const extractedData = await extractReceipt(extractInput)
+    const extracted = await extractReceipt(extractInput)
 
-    // --- Step 2: Update receipt metadata ---
-    await db.update(receipts).set({
-      storeName: extractedData.store_name,
-      storeAddress: extractedData.store_address || null,
-      receiptDatetime: new Date(extractedData.receipt_datetime),
-      subtotal: extractedData.subtotal?.toString() || null,
-      taxTotal: extractedData.tax_total?.toString() || null,
-      total: extractedData.total.toString(),
-    }).where(eq(receipts.id, receiptId))
+    // --- 2. Price comparison against previous purchases of the same generalized name ---
+    // One history query per distinct name; discount lines (price <= 0) get no indicator
+    const names = [...new Set(extracted.items.filter(i => i.unit_price > 0).map(i => i.generalized_name))]
+    const historyByName = new Map<string, number[]>()
+    await Promise.all(names.map(async (name) => {
+      const history = await getPriceHistory(db, userId, name, { excludeReceiptId: receiptId })
+      historyByName.set(name, history.map(h => h.unitPrice))
+    }))
 
-    // --- Step 3: Voyage AI embeddings (optional) ---
-    // Skipped when VOYAGE_API_KEY is unset (e.g. fully local Ollama setup);
-    // items are still saved, just without price comparison.
-    const items = extractedData.items
+    const categoryRows = await db.select({ id: categories.id, name: categories.name }).from(categories)
+    const categoryIdByName = new Map(categoryRows.map(c => [c.name, c.id]))
 
-    const textsToEmbed = items.map(item =>
-      [item.generalized_name, item.brand_name].filter(Boolean).join(' '),
-    )
-
-    let embeddings: number[][] = []
-    if (textsToEmbed.length > 0 && config.voyageApiKey) {
-      try {
-        const embeddingResult = await useVoyageClient().embed({
-          input: textsToEmbed,
-          model: 'voyage-3-lite',
-        })
-        embeddings = embeddingResult.data?.map((d: any) => d.embedding as number[]) || []
-      }
-      catch (embedErr: any) {
-        console.warn(`[process] Voyage embedding failed for receipt ${receiptId}; saving items without price comparison:`, embedErr?.message || embedErr)
-        embeddings = []
-      }
-    }
-
-    // --- Step 4: Load categories for lookup ---
-    const allCategories = await db.select().from(categories)
-    const categoryMap = new Map(allCategories.map((c: typeof allCategories[0]) => [c.name, c]))
-
-    // --- Step 5: For each item, find similar historical items and compute price indicator ---
-    const insertedItems = []
-
-    for (const [i, item] of items.entries()) {
-      const embedding = embeddings[i] || null
-      const category = categoryMap.get(item.category)
-
-      let priceIndicator: string | null = null
-      let pricePercentDiff: number | null = null
-      let historicalAvgPrice: number | null = null
-      let similarItemsCount = 0
-
-      if (embedding && embedding.length > 0 && item.unit_price > 0) {
-        const similar = await findSimilarItems(db, user.id, embedding)
-        similarItemsCount = similar.length
-
-        if (similar.length > 0) {
-          const avgPrice = similar.reduce((sum: number, s: { unit_price: string; similarity: number }) => sum + parseFloat(s.unit_price), 0) / similar.length
-          historicalAvgPrice = Math.round(avgPrice * 100) / 100
-          const currentPrice = item.unit_price
-          const diffPct = ((currentPrice - avgPrice) / avgPrice) * 100
-          pricePercentDiff = Math.round(diffPct * 10) / 10
-
-          if (diffPct < -5) priceIndicator = 'cheaper'
-          else if (diffPct > 5) priceIndicator = 'expensive'
-          else priceIndicator = 'similar'
-        }
-      }
-
-      const itemId = crypto.randomUUID()
-      const vectorStr = embedding ? `[${embedding.join(',')}]` : null
-
-      // Insert item with raw SQL for the vector column
-      await db.execute(sql`
-        INSERT INTO receipt_items (
-          id, receipt_id, user_id, raw_name, generalized_name, brand_name,
-          quantity, unit_price, line_total, tax_amount,
-          category_id, category_name,
-          embedding,
-          price_indicator, price_percent_diff, historical_avg_price, similar_items_count
-        ) VALUES (
-          ${itemId}::uuid,
-          ${receiptId}::uuid,
-          ${user.id}::uuid,
-          ${item.raw_name},
-          ${item.generalized_name},
-          ${item.brand_name || null},
-          ${(item.quantity || 1).toString()},
-          ${item.unit_price.toString()},
-          ${item.line_total.toString()},
-          ${(item.tax_amount || 0).toString()},
-          ${category?.id || null}::uuid,
-          ${item.category},
-          ${vectorStr ? sql`${vectorStr}::vector` : sql`NULL`},
-          ${priceIndicator},
-          ${pricePercentDiff?.toString() || null},
-          ${historicalAvgPrice?.toString() || null},
-          ${similarItemsCount}
-        )
-      `)
-
-      insertedItems.push({
-        id: itemId,
+    const itemRows: Array<typeof receiptItems.$inferInsert> = extracted.items.map((item, position) => {
+      const comparison = computePriceIndicator(item.unit_price, historyByName.get(item.generalized_name) ?? [])
+      return {
         receiptId,
+        userId,
+        position,
         rawName: item.raw_name,
         generalizedName: item.generalized_name,
-        brandName: item.brand_name || null,
-        quantity: item.quantity || 1,
-        unitPrice: item.unit_price,
-        lineTotal: item.line_total,
-        taxAmount: item.tax_amount || 0,
-        categoryId: category?.id || null,
+        brandName: item.brand_name ?? null,
+        quantity: String(item.quantity),
+        unitPrice: String(item.unit_price),
+        lineTotal: String(item.line_total),
+        taxAmount: String(item.tax_amount),
+        categoryId: categoryIdByName.get(item.category) ?? null,
         categoryName: item.category,
-        priceIndicator: priceIndicator as 'cheaper' | 'similar' | 'expensive' | null,
-        pricePercentDiff,
-        historicalAvgPrice,
-        similarItemsCount,
-        createdAt: new Date().toISOString(),
-      })
-    }
+        ...priceComparisonColumns(comparison),
+      }
+    })
 
-    // Mark done
-    await db.update(receipts).set({ processingStatus: 'done' }).where(eq(receipts.id, receiptId))
-
-    // Reload receipt for response
-    const reloadedRows = await db.select().from(receipts).where(eq(receipts.id, receiptId))
-    const updatedReceipt = reloadedRows[0]
-    if (!updatedReceipt) throw new Error('Receipt not found after update')
+    // --- 3. Store everything atomically (replaces items from an earlier run) ---
+    const { updated, inserted } = await db.transaction(async (tx) => {
+      await tx.delete(receiptItems).where(eq(receiptItems.receiptId, receiptId))
+      const inserted = itemRows.length > 0
+        ? await tx.insert(receiptItems).values(itemRows).returning()
+        : []
+      const [updated] = await tx.update(receipts).set({
+        storeName: extracted.store_name,
+        storeAddress: extracted.store_address ?? null,
+        receiptDatetime: new Date(extracted.receipt_datetime),
+        subtotal: extracted.subtotal === undefined ? null : String(extracted.subtotal),
+        taxTotal: extracted.tax_total === undefined ? null : String(extracted.tax_total),
+        total: String(extracted.total),
+        processingStatus: 'done',
+      }).where(eq(receipts.id, receiptId)).returning()
+      if (!updated) throw new Error('Receipt disappeared during processing')
+      return { updated, inserted }
+    })
 
     return {
-      receipt: {
-        id: updatedReceipt.id,
-        userId: updatedReceipt.userId,
-        storeName: updatedReceipt.storeName,
-        storeAddress: updatedReceipt.storeAddress ?? null,
-        receiptDatetime: updatedReceipt.receiptDatetime.toISOString(),
-        subtotal: updatedReceipt.subtotal ? Number(updatedReceipt.subtotal) : null,
-        taxTotal: updatedReceipt.taxTotal ? Number(updatedReceipt.taxTotal) : null,
-        total: Number(updatedReceipt.total),
-        imageUrl: updatedReceipt.imageUrl ?? null,
-        rawText: updatedReceipt.rawText ?? null,
-        inputMethod: updatedReceipt.inputMethod as 'camera' | 'upload' | 'text',
-        processingStatus: updatedReceipt.processingStatus as 'pending' | 'processing' | 'done' | 'error',
-        createdAt: updatedReceipt.createdAt.toISOString(),
-        updatedAt: updatedReceipt.updatedAt.toISOString(),
-      },
-      items: insertedItems,
+      receipt: toReceiptDto(updated),
+      items: inserted.sort((a, b) => a.position - b.position).map(toReceiptItemDto),
     }
   }
   catch (err: any) {
+    console.error(`[process] receipt ${receiptId} failed:`, err)
     await db.update(receipts).set({ processingStatus: 'error' }).where(eq(receipts.id, receiptId))
-    throw createError({ statusCode: 500, message: err.message || 'Processing failed' })
+      .catch((e: unknown) => console.error('[process] could not mark receipt as error:', e))
+    throw createError({
+      statusCode: 500,
+      statusMessage: 'Processing failed',
+      message: err?.message || 'Processing failed',
+    })
   }
 })

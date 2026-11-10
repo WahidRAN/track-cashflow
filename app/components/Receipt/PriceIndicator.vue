@@ -20,10 +20,9 @@ const props = defineProps<{
   indicator: 'cheaper' | 'similar' | 'expensive' | null
   percentDiff: number | null
   historicalAvg: number | null
-  currency?: string
 }>()
 
-const currency = props.currency || 'USD'
+const { formatCurrency } = useFormat()
 
 const color = computed(() => {
   if (props.indicator === 'cheaper') return 'success' as const
@@ -38,16 +37,14 @@ const icon = computed(() => {
 })
 
 const label = computed(() => {
-  if (!props.percentDiff) return props.indicator || ''
-  const abs = Math.abs(props.percentDiff)
-  if (props.indicator === 'cheaper') return `-${abs}%`
-  if (props.indicator === 'expensive') return `+${abs}%`
+  const pct = props.percentDiff == null ? 0 : Math.round(Math.abs(props.percentDiff))
+  if (props.indicator === 'cheaper') return pct ? `-${pct}%` : 'Cheaper'
+  if (props.indicator === 'expensive') return pct ? `+${pct}%` : 'Pricier'
   return 'Similar'
 })
 
 const tooltipText = computed(() => {
   if (!props.historicalAvg) return 'Compared to your purchase history'
-  const formatted = new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(props.historicalAvg)
-  return `Historical avg: ${formatted}`
+  return `Historical avg: ${formatCurrency(props.historicalAvg)}`
 })
 </script>

@@ -13,7 +13,6 @@
       ref="fileInput"
       type="file"
       accept="image/*"
-      capture="environment"
       class="hidden"
       @change="handleFile"
     />
@@ -29,9 +28,10 @@
     </div>
 
     <div v-else class="relative">
-      <img :src="preview" class="max-h-64 mx-auto rounded-xl object-contain" />
+      <img :src="preview" alt="Selected receipt" class="max-h-64 mx-auto rounded-xl object-contain">
       <button
         class="absolute top-2 right-2 w-8 h-8 bg-black/60 rounded-full flex items-center justify-center"
+        aria-label="Remove photo"
         @click.stop="clear"
       >
         <UIcon name="i-heroicons-x-mark" class="w-4 h-4 text-white" />
@@ -43,6 +43,7 @@
 <script setup lang="ts">
 const emit = defineEmits<{
   selected: [file: File]
+  cleared: []
 }>()
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -70,6 +71,7 @@ function clear() {
   if (preview.value) URL.revokeObjectURL(preview.value)
   preview.value = null
   if (fileInput.value) fileInput.value.value = ''
+  emit('cleared')
 }
 
 onUnmounted(() => {

@@ -1,0 +1,115 @@
+# Supabase CLI local stack for Track Cashflow (`npm run db:start`).
+# Reference: https://supabase.com/docs/guides/local-development/cli/config
+#
+# Trimmed to what the app uses so it fits on a 16 GB laptop next to Nuxt (and optionally Ollama):
+#   db (Postgres) · api (Kong gateway + PostgREST) · auth (GoTrue) · storage · inbucket (Mailpit)
+# Everything else is explicitly disabled below. Omitted keys fall back to CLI defaults.
+# After editing this file: `npm run db:stop && npm run db:start`.
+
+# Prefix for the Docker container/volume names (supabase_db_track-cashflow, ...).
+project_id = "track-cashflow"
+
+[api]
+enabled = true
+# API gateway: http://127.0.0.1:54321 (auth: /auth/v1, storage: /storage/v1, rest: /rest/v1)
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+# postgresql://postgres:postgres@127.0.0.1:54322/postgres
+port = 54322
+shadow_port = 54320
+health_timeout = "2m"
+# Must match the hosted project's Postgres major version.
+major_version = 17
+
+[db.pooler]
+enabled = false
+
+[db.migrations]
+# Applies supabase/migrations/*.sql on `db:start` (first run) and on every `db:reset`.
+enabled = true
+
+[db.seed]
+# Categories are inserted by the initial migration, so there is no seed file.
+# To add local demo data: create supabase/seed.sql and set enabled = true.
+enabled = false
+sql_paths = ["./seed.sql"]
+
+[realtime]
+enabled = false
+
+[studio]
+# Disabled to save RAM (also skips postgres-meta). Use `npm run db:studio` (Drizzle Studio)
+# or any Postgres client on port 54322 instead.
+enabled = false
+
+[inbucket]
+# Mailpit catches all auth emails (magic links) — open http://127.0.0.1:54324. No SMTP needed.
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+# Private bucket for receipt images. Created on `db:start`; the server reads/writes it with the
+# service-role key and serves images via GET /api/receipts/[id]/image.
+[storage.buckets.receipts]
+public = false
+file_size_limit = "10MiB"
+allowed_mime_types = ["image/jpeg", "image/png", "image/webp", "image/heic"]
+
+[storage.image_transformation]
+enabled = false
+
+[storage.s3_protocol]
+enabled = false
+
+[storage.analytics]
+enabled = false
+
+[storage.vector]
+enabled = false
+
+[auth]
+enabled = true
+# Used to build email links and as the default redirect target.
+site_url = "http://localhost:3000"
+# Allowed post-login redirect targets (the app sends <origin>/auth/confirm).
+# To log in from a phone on your LAN, add e.g. "http://192.168.1.23:3000/**" and restart the stack.
+additional_redirect_urls = ["http://localhost:3000/**", "http://127.0.0.1:3000/**"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+enable_signup = true
+enable_anonymous_sign_ins = false
+enable_manual_linking = false
+
+[auth.rate_limit]
+# Local only: generous limits so repeated magic-link logins don't get throttled.
+email_sent = 100
+sign_in_sign_ups = 100
+token_verifications = 100
+
+[auth.email]
+# Magic link / email OTP sign-in. Any email address works locally; the mail lands in Mailpit.
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = false
+secure_password_change = false
+max_frequency = "1s"
+otp_length = 6
+otp_expiry = 3600
+
+[auth.sms]
+enable_signup = false
+
+[edge_runtime]
+enabled = false
+
+[analytics]
+# Disabling analytics also skips the Logflare and Vector containers.
+enabled = false

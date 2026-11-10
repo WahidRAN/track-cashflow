@@ -3,39 +3,29 @@ export function useReceipt() {
   const processing = ref(false)
   const error = ref<string | null>(null)
 
-  async function uploadAndProcess(input: File | Blob | string): Promise<string | null> {
+  /**
+   * Create a receipt from text or an image, then run extraction. Resolves to the receipt id
+   * (also when the server reports it's already being processed), or null on failure.
+   */
+  async function uploadAndProcess(
+    input: File | Blob | string,
+    inputMethod: ImageInputMethod = 'upload',
+  ): Promise<string | null> {
     error.value = null
     uploading.value = true
 
     try {
-      let receiptId: string
-
-      if (typeof input === 'string') {
-        const res = await $fetch<{ receiptId: string }>('/api/receipts', {
-          method: 'POST',
-          body: { text: input },
-        })
-        receiptId = res.receiptId
-      } else {
-        // Downscale big phone photos (local vision models + Claude's ~5MB limit)
-        const resized = await resizeImage(input)
-        const formData = new FormData()
-        formData.append('image', resized, 'receipt.jpg')
-        const res = await $fetch<{ receiptId: string }>('/api/receipts', {
-          method: 'POST',
-          body: formData,
-        })
-        receiptId = res.receiptId
-      }
+      const receiptId = await createReceipt(typeof input === 'string' ? input : { image: input, inputMethod })
 
       uploading.value = false
       processing.value = true
 
-      await $fetch(`/api/receipts/${receiptId}/process`, { method: 'POST' })
+      // 'already-processing' (409) is fine: the receipt page shows the result once it's done
+      await processReceipt(receiptId)
 
       return receiptId
-    } catch (e: any) {
-      error.value = e.message || 'Failed to process receipt'
+    } catch (e) {
+      error.value = getErrorMessage(e, 'Failed to process receipt')
       return null
     } finally {
       uploading.value = false

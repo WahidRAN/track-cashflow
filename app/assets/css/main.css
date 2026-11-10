@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "@nuxt/ui";
 
 /* iOS safe area support */
 :root {
@@ -17,4 +18,9 @@ html {
 /* Better touch targets */
 button, a {
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Bottom padding that clears the iOS home indicator (used by full-screen camera controls) */
+.safe-bottom {
+  padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));
 }

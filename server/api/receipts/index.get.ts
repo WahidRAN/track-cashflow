@@ -1,58 +1,66 @@
-import { serverSupabaseUser } from '#supabase/server'
+import { and, count, desc, eq, gte, ilike, lt, or, sql, type SQL } from 'drizzle-orm'
+import { requireUserId } from '~/server/utils/auth'
 import { useDb } from '~/server/utils/db'
+import { resolveTimezone } from '~/server/utils/datetime'
+import { escapeLike, readDateRangeQuery, readIntQuery } from '~/server/utils/request'
+import { toReceiptDto } from '~/server/utils/receiptDto'
 import { receipts } from '~/db/schema'
-import { eq, desc, and, gte, lte, count, sql } from 'drizzle-orm'
+import type { ReceiptListResponse } from '~/types/api'
 
-export default defineEventHandler(async (event) => {
-  const user = await serverSupabaseUser(event)
-  if (!user) throw createError({ statusCode: 401, message: 'Unauthorized' })
-
+/**
+ * Paginated receipt list, newest first.
+ * Query: page, pageSize (≤100), from, to (ISO datetime, or YYYY-MM-DD = whole
+ * local day), search (substring of store name or any item name), category.
+ */
+export default defineEventHandler(async (event): Promise<ReceiptListResponse> => {
+  const userId = await requireUserId(event)
   const query = getQuery(event)
-  const page = Number(query.page) || 1
-  const pageSize = Number(query.pageSize) || 20
-  const offset = (page - 1) * pageSize
-
+  const page = readIntQuery(query.page, 1, 1, 10_000)
+  const pageSize = readIntQuery(query.pageSize, 20, 1, 100)
+  const { from, toExclusive } = readDateRangeQuery(event, resolveTimezone(event))
   const db = useDb()
 
-  const conditions = [eq(receipts.userId, user.id)]
-  if (query.from) conditions.push(gte(receipts.receiptDatetime, new Date(query.from as string)))
-  if (query.to) conditions.push(lte(receipts.receiptDatetime, new Date(query.to as string)))
-  if (query.search) conditions.push(sql`store_search_vector @@ plainto_tsquery('english', ${query.search as string})`)
-  if (query.category) conditions.push(sql`EXISTS (
-    SELECT 1 FROM receipt_items ri
-    WHERE ri.receipt_id = ${receipts.id}
-      AND ri.category_name = ${query.category as string}
-  )`)
+  const conditions: SQL[] = [eq(receipts.userId, userId)]
+  if (from) conditions.push(gte(receipts.receiptDatetime, from))
+  if (toExclusive) conditions.push(lt(receipts.receiptDatetime, toExclusive))
 
-  const [data, totalResult] = await Promise.all([
+  // Substring match (ILIKE) rather than full-text search: store names are often
+  // Japanese, which english tsvector can't split, and partial input should match.
+  const search = typeof query.search === 'string' ? query.search.trim().slice(0, 100) : ''
+  if (search) {
+    const pattern = `%${escapeLike(search)}%`
+    conditions.push(or(
+      ilike(receipts.storeName, pattern),
+      sql`EXISTS (
+        SELECT 1 FROM public.receipt_items ri
+        WHERE ri.receipt_id = ${receipts.id}
+          AND (ri.generalized_name ILIKE ${pattern} OR ri.raw_name ILIKE ${pattern} OR ri.brand_name ILIKE ${pattern})
+      )`,
+    )!)
+  }
+
+  const category = typeof query.category === 'string' ? query.category.trim() : ''
+  if (category) {
+    conditions.push(sql`EXISTS (
+      SELECT 1 FROM public.receipt_items ri
+      WHERE ri.receipt_id = ${receipts.id}
+        AND ri.category_name = ${category}
+    )`)
+  }
+
+  const where = and(...conditions)
+  const [rows, totalResult] = await Promise.all([
     db.select().from(receipts)
-      .where(and(...conditions))
-      .orderBy(desc(receipts.receiptDatetime))
+      .where(where)
+      .orderBy(desc(receipts.receiptDatetime), desc(receipts.createdAt))
       .limit(pageSize)
-      .offset(offset),
-    db.select({ total: count() }).from(receipts).where(and(...conditions)),
+      .offset((page - 1) * pageSize),
+    db.select({ total: count() }).from(receipts).where(where),
   ])
 
-  const total = totalResult[0]?.total ?? 0
-
   return {
-    data: data.map((r: typeof data[0]) => ({
-      id: r.id,
-      userId: r.userId,
-      storeName: r.storeName,
-      storeAddress: r.storeAddress ?? null,
-      receiptDatetime: r.receiptDatetime.toISOString(),
-      subtotal: r.subtotal ? Number(r.subtotal) : null,
-      taxTotal: r.taxTotal ? Number(r.taxTotal) : null,
-      total: Number(r.total),
-      imageUrl: r.imageUrl ?? null,
-      rawText: r.rawText ?? null,
-      inputMethod: r.inputMethod as 'camera' | 'upload' | 'text',
-      processingStatus: r.processingStatus as 'pending' | 'processing' | 'done' | 'error',
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: r.updatedAt.toISOString(),
-    })),
-    total: Number(total ?? 0),
+    data: rows.map(toReceiptDto),
+    total: Number(totalResult[0]?.total ?? 0),
     page,
     pageSize,
   }

@@ -1,16 +1,13 @@
 <template>
   <UModal
     v-model:open="open"
-    :ui="{ wrapper: 'items-end sm:items-center', content: 'rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md' }"
     title="Edit Item"
+    :ui="{ content: 'sm:max-w-md' }"
   >
     <template #body>
-      <div class="space-y-4 px-1 pb-2">
-        <UFormField label="Item name">
+      <form class="space-y-4" @submit.prevent="save">
+        <UFormField label="Item name" :help="item.rawName ? `Original: ${item.rawName}` : undefined">
           <UInput v-model="form.generalizedName" placeholder="e.g. Organic Whole Milk 1L" class="w-full" />
-          <template #hint>
-            <span class="text-xs text-gray-400">Original: {{ item.rawName }}</span>
-          </template>
         </UFormField>
 
         <UFormField label="Brand (optional)">
@@ -19,10 +16,18 @@
 
         <div class="grid grid-cols-2 gap-3">
           <UFormField label="Unit price">
-            <UInput v-model.number="form.unitPrice" type="number" step="0.01" min="0" class="w-full" />
+            <UInput
+              v-model.number="form.unitPrice"
+              type="number"
+              :step="amountStep"
+              :inputmode="currencyFractionDigits === 0 ? 'numeric' : 'decimal'"
+              min="0"
+              :placeholder="amountPlaceholder"
+              class="w-full"
+            />
           </UFormField>
           <UFormField label="Quantity">
-            <UInput v-model.number="form.quantity" type="number" step="0.1" min="0.1" class="w-full" />
+            <UInput v-model.number="form.quantity" type="number" step="0.1" min="0.1" inputmode="decimal" class="w-full" />
           </UFormField>
         </div>
 
@@ -34,17 +39,20 @@
           />
         </UFormField>
 
-        <UAlert v-if="nameChanged" color="info" description="Price history will be recalculated for the new item name." />
-        <UAlert v-if="error" color="error" :description="error" />
-      </div>
+        <UAlert v-if="nameChanged" color="info" variant="subtle" description="Price history will be recalculated for the new item name." />
+        <UAlert v-if="error" color="error" variant="subtle" :description="error" />
+
+        <!-- Lets the mobile keyboard's "Go" submit the form -->
+        <button type="submit" class="hidden" />
+      </form>
     </template>
 
     <template #footer>
       <div class="flex gap-3 w-full">
-        <UButton variant="ghost" color="neutral" class="flex-1" @click="() => { open = false }">
+        <UButton variant="ghost" color="neutral" class="flex-1 justify-center" @click="() => { open = false }">
           Cancel
         </UButton>
-        <UButton color="primary" class="flex-1" :loading="saving" @click="save">
+        <UButton color="primary" class="flex-1 justify-center" :loading="saving" @click="save">
           Save
         </UButton>
       </div>
@@ -60,52 +68,78 @@ const emit = defineEmits<{ updated: [item: ReceiptItem] }>()
 
 const open = defineModel<boolean>('open', { default: false })
 
+const { amountStep, amountPlaceholder, currencyFractionDigits, roundCurrency } = useFormat()
+
 const categoryOptions = [
   'Groceries', 'Personal Care', 'Household', 'Pharmacy',
   'Restaurant', 'Coffee', 'Clothing', 'Electronics',
   'Transportation', 'Entertainment', 'Other',
 ]
 
-const form = reactive({
-  generalizedName: props.item.generalizedName,
-  brandName: props.item.brandName || '',
-  unitPrice: props.item.unitPrice,
-  quantity: props.item.quantity || 1,
-  categoryName: props.item.categoryName || 'Other',
-})
+function formFrom(i: ReceiptItem) {
+  return {
+    generalizedName: i.generalizedName,
+    brandName: i.brandName || '',
+    // v-model.number leaves '' in place when the input is cleared
+    unitPrice: i.unitPrice as number | string,
+    quantity: (i.quantity || 1) as number | string,
+    categoryName: i.categoryName || 'Other',
+  }
+}
 
-watch(() => props.item, (i) => {
-  form.generalizedName = i.generalizedName
-  form.brandName = i.brandName || ''
-  form.unitPrice = i.unitPrice
-  form.quantity = i.quantity || 1
-  form.categoryName = i.categoryName || 'Other'
-})
-
-const nameChanged = computed(() => form.generalizedName !== props.item.generalizedName)
+const form = reactive(formFrom(props.item))
 const saving = ref(false)
 const error = ref<string | null>(null)
 
-async function save() {
-  saving.value = true
+function resetForm() {
+  Object.assign(form, formFrom(props.item))
   error.value = null
+}
+
+// Re-seed on every open so abandoned edits don't linger, and when a different item is passed in
+watch(open, (isOpen) => { if (isOpen) resetForm() })
+watch(() => props.item, resetForm)
+
+const nameChanged = computed(() => form.generalizedName.trim() !== props.item.generalizedName)
+
+function toNumber(v: unknown): number | null {
+  if (v === '' || v === null || v === undefined) return null
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+async function save() {
+  if (saving.value) return
+  error.value = null
+
+  const generalizedName = form.generalizedName.trim()
+  const unitPrice = toNumber(form.unitPrice)
+  const quantity = toNumber(form.quantity)
+  if (!generalizedName) return void (error.value = 'Item name is required')
+  if (unitPrice === null || unitPrice < 0) return void (error.value = 'Enter a valid unit price')
+  if (quantity === null || quantity <= 0) return void (error.value = 'Quantity must be greater than 0')
+
+  // Keep the receipt's own line total (which may include a discount) unless price/qty were edited
+  const priceOrQtyChanged = unitPrice !== props.item.unitPrice || quantity !== (props.item.quantity || 1)
+  const lineTotal = priceOrQtyChanged ? roundCurrency(unitPrice * quantity) : props.item.lineTotal
+
+  saving.value = true
   try {
-    const lineTotal = form.unitPrice * form.quantity
     const updated = await $fetch<ReceiptItem>(`/api/items/${props.item.id}`, {
       method: 'PATCH',
       body: {
-        generalizedName: form.generalizedName,
-        brandName: form.brandName || null,
-        unitPrice: form.unitPrice,
-        quantity: form.quantity,
+        generalizedName,
+        brandName: form.brandName.trim() || null,
+        unitPrice,
+        quantity,
         lineTotal,
         categoryName: form.categoryName,
       },
     })
     emit('updated', updated)
     open.value = false
-  } catch (e: any) {
-    error.value = e.message || 'Failed to save'
+  } catch (e) {
+    error.value = getErrorMessage(e, 'Failed to save')
   } finally {
     saving.value = false
   }

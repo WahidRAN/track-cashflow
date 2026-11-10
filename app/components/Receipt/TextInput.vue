@@ -14,7 +14,7 @@
     <UButton
       block
       color="primary"
-      :disabled="!text.trim()"
+      :disabled="disabled || !text.trim()"
       @click="$emit('submit', text)"
     >
       Process text
@@ -23,6 +23,7 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ disabled?: boolean }>()
 defineEmits<{ submit: [text: string] }>()
 const text = ref('')
 </script>

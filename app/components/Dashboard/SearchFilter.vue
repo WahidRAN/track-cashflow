@@ -4,9 +4,9 @@
     <UInput
       v-model="search"
       icon="i-heroicons-magnifying-glass"
-      placeholder="Search store name..."
+      placeholder="Search stores or items..."
       class="w-full"
-      @input="emitDebounced"
+      @update:model-value="emitDebounced"
     />
 
     <!-- Filter chips row -->
@@ -80,11 +80,10 @@ const categories = [
 interface DatePreset {
   id: string
   label: string
-  from: string | null
-  to: string | null
+  /** Start of the range, computed when the filter is applied (not when the page loaded) */
+  from: (() => string) | null
 }
 
-function isoNow() { return new Date().toISOString() }
 function isoStartOf(unit: 'week' | 'month' | 'year') {
   const d = new Date()
   if (unit === 'week') d.setDate(d.getDate() - d.getDay())
@@ -94,11 +93,13 @@ function isoStartOf(unit: 'week' | 'month' | 'year') {
   return d.toISOString()
 }
 
+// Open-ended ranges ("this week" = from Sunday 00:00 onwards) so receipts added after the page
+// was opened, or dated slightly ahead by OCR, are still included
 const datePresets: DatePreset[] = [
-  { id: 'all', label: 'All time', from: null, to: null },
-  { id: 'week', label: 'This week', from: isoStartOf('week'), to: isoNow() },
-  { id: 'month', label: 'This month', from: isoStartOf('month'), to: isoNow() },
-  { id: 'year', label: 'This year', from: isoStartOf('year'), to: isoNow() },
+  { id: 'all', label: 'All time', from: null },
+  { id: 'week', label: 'This week', from: () => isoStartOf('week') },
+  { id: 'month', label: 'This month', from: () => isoStartOf('month') },
+  { id: 'year', label: 'This year', from: () => isoStartOf('year') },
 ]
 
 let activePreset: DatePreset = datePresets[0]!
@@ -121,11 +122,16 @@ function emitDebounced() {
 }
 
 function emitFilters() {
+  if (debounceTimer) clearTimeout(debounceTimer)
   emit('change', {
-    search: search.value,
+    search: search.value.trim(),
     category: activeCategory.value,
-    from: activePreset.from,
-    to: activePreset.to,
+    from: activePreset.from ? activePreset.from() : null,
+    to: null,
   })
 }
+
+onBeforeUnmount(() => {
+  if (debounceTimer) clearTimeout(debounceTimer)
+})
 </script>

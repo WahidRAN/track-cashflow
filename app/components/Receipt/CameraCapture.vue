@@ -29,6 +29,7 @@
       <!-- Cancel -->
       <button
         class="w-12 h-12 flex items-center justify-center text-white/70"
+        aria-label="Close camera"
         @click="$emit('cancel')"
       >
         <UIcon name="i-heroicons-x-mark" class="w-6 h-6" />
@@ -36,8 +37,9 @@
 
       <!-- Capture -->
       <button
-        class="w-20 h-20 rounded-full bg-white border-4 border-white/30 flex items-center justify-center shadow-xl active:scale-95 transition-transform"
+        class="w-20 h-20 rounded-full bg-white border-4 border-white/30 flex items-center justify-center shadow-xl active:scale-95 transition disabled:opacity-40"
         :disabled="!ready"
+        aria-label="Take photo"
         @click="capture"
       >
         <div class="w-16 h-16 rounded-full bg-white" />
@@ -55,7 +57,7 @@
       v-if="previewUrl"
       class="fixed inset-0 bg-black z-10 flex flex-col"
     >
-      <img :src="previewUrl" class="flex-1 object-contain w-full" />
+      <img :src="previewUrl" alt="Captured receipt" class="flex-1 min-h-0 object-contain w-full">
       <div class="bg-black/90 safe-bottom px-6 py-6 flex items-center justify-between gap-4">
         <UButton
           variant="ghost"
@@ -83,6 +85,8 @@
 const emit = defineEmits<{
   cancel: []
   captured: [blob: Blob]
+  /** Camera can't be used here; the parent should suggest the Upload tab. */
+  unavailable: [reason: string]
 }>()
 
 const videoEl = ref<HTMLVideoElement | null>(null)
@@ -93,25 +97,51 @@ const capturedBlob = ref<Blob | null>(null)
 const uploading = ref(false)
 let stream: MediaStream | null = null
 
-onMounted(async () => {
+function stopStream() {
+  stream?.getTracks().forEach(t => t.stop())
+  stream = null
+}
+
+function describeCameraError(e: unknown): string {
+  const name = e instanceof Error ? e.name : ''
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    return 'Camera permission was denied. Allow camera access in your browser settings, or use the Upload tab.'
+  }
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+    return 'No camera was found on this device. Use the Upload tab instead.'
+  }
+  if (name === 'NotReadableError') {
+    return 'The camera is in use by another app. Close it and try again, or use the Upload tab.'
+  }
+  return 'Could not start the camera. Use the Upload tab instead.'
+}
+
+async function startStream(constraints: MediaTrackConstraints) {
+  // getUserMedia only exists in secure contexts: https:// or http://localhost.
+  // Opening the dev server from a phone via http://192.168.x.x lands here.
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    emit('unavailable', 'The camera needs HTTPS (or localhost). Use the Upload tab — on a phone it can open the camera too.')
+    return
+  }
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: false,
-    })
+    stream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false })
     if (videoEl.value) {
       videoEl.value.srcObject = stream
       await videoEl.value.play()
       ready.value = true
     }
-  } catch {
-    // Fallback: emit cancel so parent can switch to upload
-    emit('cancel')
+  } catch (e) {
+    stopStream()
+    emit('unavailable', describeCameraError(e))
   }
+}
+
+onMounted(() => {
+  startStream({ facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } })
 })
 
 onUnmounted(() => {
-  stream?.getTracks().forEach(t => t.stop())
+  stopStream()
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
 })
 
@@ -121,13 +151,16 @@ function capture() {
   const canvas = canvasEl.value
   canvas.width = video.videoWidth
   canvas.height = video.videoHeight
-  canvas.getContext('2d')!.drawImage(video, 0, 0)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.drawImage(video, 0, 0)
   canvas.toBlob(
     (blob) => {
       if (!blob) return
       capturedBlob.value = blob
       previewUrl.value = URL.createObjectURL(blob)
-      stream?.getTracks().forEach(t => t.stop())
+      ready.value = false
+      stopStream()
     },
     'image/jpeg',
     0.92,
@@ -138,17 +171,7 @@ function retake() {
   if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
   previewUrl.value = null
   capturedBlob.value = null
-  // Restart stream
-  navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'environment' },
-    audio: false,
-  }).then(s => {
-    stream = s
-    if (videoEl.value) {
-      videoEl.value.srcObject = s
-      videoEl.value.play()
-    }
-  })
+  startStream({ facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } })
 }
 
 function usePhoto() {
